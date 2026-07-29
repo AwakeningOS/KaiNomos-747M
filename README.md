@@ -9,6 +9,10 @@ selected architectural ideas described in the
 problem to a 111M-parameter, text-only model designed for controlled experiments
 on a single consumer GPU.
 
+- [Hugging Face model page](https://huggingface.co/AwakeningOS/K3Mini-110M)
+- [Hugging Face model card source](MODEL_CARD.md)
+- [Machine-readable architecture configuration](k3mini-110m-architecture.json)
+
 This is not an official Moonshot AI project, a conversion of Kimi K3 weights, or
 a claim to reproduce Kimi K3's capabilities. Kimi K3 is a 2.8T-parameter
 multimodal MoE system with a one-million-token context. K3Mini is a small dense
@@ -189,62 +193,27 @@ strong AI research collaborator can:
 AI assistance is not evidence that an architecture works. Only controlled,
 reproducible results can establish that.
 
-## From one model to a distributed home-GPU lab
+## Reproducible research first
 
-K3Mini is intended as a seed for a broader English-language community:
-**Homebrew LLM Lab**.
+This project is not launching a separate community yet. The immediate priority
+is to finish the model, publish the complete Base-versus-Adaptive evidence, and
+invite review through established open-model communities.
 
-The idea is to make small-model architecture research accessible to people
-outside large laboratories. Participants can use AI tools to design, implement,
-train, challenge, and extend models small enough to run on personal hardware.
-The competition is cooperative: fork an experiment, improve it, disprove it, or
-explain why it failed.
-
-The community's most valuable output should not be a leaderboard. It should be
-the complete research trail:
+The long-term possibility is a distributed home-GPU research workflow built
+around the complete trail:
 
 ```text
 hypothesis → prior work → implementation → bugs → results → verdict → next test
 ```
 
-Every experiment should report at least:
+That possibility should be earned by a useful, reproducible result—not by
+opening an empty organization or chat server. Code, configs, seeds, tokenizer
+identity, data manifests, logs, checkpoint hashes, negative results, and
+discovered bugs therefore come first. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the experiment-reporting standard.
 
-```yaml
-experiment_id: EXP-0001
-base_model: K3Mini-Base-110M
-change:
-  description: What changed?
-prior_work:
-  papers: []
-claim: What should improve, and why?
-
-training:
-  gpu:
-  seed:
-  tokens:
-  compute_flops:
-  peak_vram:
-  wall_time:
-
-results:
-  validation_nll:
-  test_nll:
-  tokens_per_second:
-
-verdict: adopted | rejected | inconclusive
-failures: []
-```
-
-Code, configs, seeds, tokenizer identity, data manifests, logs, checkpoint
-hashes, negative results, and discovered bugs all matter. Important decisions
-belong in GitHub Discussions or experiment reports—not only in ephemeral chat.
-See [CONTRIBUTING.md](CONTRIBUTING.md) to propose an experiment.
-
-If many people can run rigorous small experiments in parallel, the community
-can eliminate weak ideas earlier, identify mechanisms worth scaling, and create
-better training data for future AI research agents. Results at 110M parameters
-do not automatically transfer to billion-parameter models; promising findings
-must be reproduced across scales.
+Results at 110M parameters do not automatically transfer to billion-parameter
+models; promising findings must be reproduced across scales.
 
 ## Attribution and scope
 

@@ -15,6 +15,18 @@ tokenisation time, where the true counts are known.
     Educational Code          10%
     Math / Reasoning           5%
 
+Stage order matters and is not the obvious one:
+
+    collect -> light clean -> tokenizer -> MinHash -> contamination -> tokenize
+
+The light clean (Unicode normalisation, boilerplate stripping, exact-duplicate
+and repeated-line removal) runs *before* the tokenizer is trained.  Training a
+32,768-piece vocabulary on unwashed web text spends pieces on navigation chrome,
+cookie banners and mojibake -- vocabulary slots are a fixed budget, and anything
+spent there is unavailable to Japanese.  The expensive near-duplicate pass can
+wait until after, because it changes how often text appears rather than what the
+text looks like.
+
 Every stage is resumable: an interrupted download continues from the shard it
 reached, never from zero.
 """
@@ -75,10 +87,17 @@ SOURCES: list[Source] = [
              split="train", streaming=True),
         note="document-grounded QA, not open-domain chat",
     ),
+    # DEVIATION from the design: this slice was specified as a Reference *mix*
+    # (Wikipedia 70 / Wikibooks 10 / Wikiversity 5 / government documents 15).
+    # Japanese Wikibooks and Wikiversity have no published dataset, and the
+    # e-Gov corpus did not load reliably, so the slice is Wikipedia alone.  It is
+    # named for what it is rather than for what was intended; formal and
+    # administrative Japanese is therefore *not* covered and should be added back
+    # if that register matters.
     Source(
-        "ja_reference", 0.10, "ja",
+        "ja_wikipedia_reference", 0.10, "ja",
         dict(path="wikimedia/wikipedia", name="20231101.ja", split="train", streaming=True),
-        note="definitions, proper nouns and structured explanation that web text lacks",
+        note="Wikipedia only -- NOT the full Reference mix; see the deviation note",
     ),
     Source(
         "en_edu", 0.10, "en",
@@ -209,6 +228,60 @@ class MixCollector:
         return st
 
 
+def write_manifest(root: Path, collector: "MixCollector") -> dict:
+    """Record enough to rebuild this exact pool later.
+
+    A ratio table alone cannot be reproduced: the same dataset name can point at
+    different content after a revision, and the stream position decides which
+    rows were actually taken.
+    """
+    import time as _time
+
+    from huggingface_hub import HfApi
+
+    api = HfApi()
+    entries = []
+    for source in SOURCES:
+        state = collector.state.get(source.name)
+        info = {}
+        try:
+            repo = api.repo_info(source.loader["path"], repo_type="dataset")
+            info = {"revision_sha": repo.sha,
+                    "license": (repo.card_data or {}).get("license")
+                    if hasattr(repo, "card_data") else None}
+        except Exception as exc:
+            info = {"revision_sha": None, "error": repr(exc)[:200]}
+        entries.append({
+            "source": source.name,
+            "ratio": source.ratio,
+            "kind": source.kind,
+            "dataset": source.loader["path"],
+            "config": source.loader.get("name"),
+            "data_dir": source.loader.get("data_dir"),
+            "split": source.loader.get("split"),
+            "filters": source.filters,
+            "note": source.note,
+            "documents": state.documents if state else 0,
+            "bytes": state.bytes_written if state else 0,
+            "shards": state.shards if state else 0,
+            # the stream range actually consumed, so the same rows can be retaken
+            "records_consumed": state.records_seen if state else 0,
+            **info,
+        })
+    manifest = {
+        "name": "K3Mini-DataMix-2B-v1",
+        "created_utc": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+        "target_tokens": collector.total_tokens,
+        "split_seed": SPLIT_SEED,
+        "bytes_per_token_estimate": BYTES_PER_TOKEN,
+        "stage_order": ["collect", "clean", "tokenizer", "minhash",
+                        "contamination", "tokenize"],
+        "sources": entries,
+    }
+    (root / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
+    return manifest
+
+
 def plan(total_tokens: int = TARGET_TOKENS) -> list[dict]:
     return [
         {
@@ -224,7 +297,7 @@ def plan(total_tokens: int = TARGET_TOKENS) -> list[dict]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("command", choices=["plan", "collect"])
+    ap.add_argument("command", choices=["plan", "collect", "manifest"])
     ap.add_argument("--root", default="data/mix")
     ap.add_argument("--total-tokens", type=int, default=TARGET_TOKENS)
     ap.add_argument("--only", default=None, help="comma-separated source names")
@@ -243,12 +316,22 @@ def main() -> int:
 
     root = Path(args.root)
     root.mkdir(parents=True, exist_ok=True)
-    wanted = set(args.only.split(",")) if args.only else None
     collector = MixCollector(root, args.total_tokens)
+
+    if args.command == "manifest":
+        manifest = write_manifest(root, collector)
+        print(json.dumps({k: v for k, v in manifest.items() if k != "sources"}, indent=2))
+        for entry in manifest["sources"]:
+            print(f"  {entry['source']:24} {entry['documents']:>10,} docs  "
+                  f"{entry['bytes']/1e9:>6.2f} GB  rev {str(entry['revision_sha'])[:12]}")
+        return 0
+
+    wanted = set(args.only.split(",")) if args.only else None
     for source in SOURCES:
         if wanted and source.name not in wanted:
             continue
         collector.collect(source)
+    write_manifest(root, collector)
     return 0
 
 

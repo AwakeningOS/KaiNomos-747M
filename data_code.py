@@ -75,6 +75,9 @@ class CodeState:
     records_seen: int = 0
     rejected_license: int = 0
     fetch_failed: int = 0
+    # blob ids Software Heritage would not return, kept so a retry pass can be
+    # targeted rather than restarting the language
+    failed_blob_ids: list = field(default_factory=list)
     done: bool = False
     licenses: dict = field(default_factory=dict)
 
@@ -117,6 +120,9 @@ def collect_language(
         state.shards += 1
         buffer.clear()
         provenance.clear()
+        (out_dir / "code_state.json").write_text(
+            json.dumps(state.__dict__, indent=2, ensure_ascii=False)
+        )
 
     def drain() -> None:
         nonlocal pending
@@ -127,6 +133,8 @@ def collect_language(
         for record, text in zip(pending, texts):
             if not text:
                 state.fetch_failed += 1
+                if len(state.failed_blob_ids) < 100_000:
+                    state.failed_blob_ids.append(record["blob_id"])
                 continue
             state.documents += 1
             state.bytes_written += len(text.encode("utf-8"))

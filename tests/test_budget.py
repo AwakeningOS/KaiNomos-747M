@@ -70,3 +70,50 @@ def test_cheaper_and_richer_policies_move_the_cost_the_right_way():
     cheap = cost_with({"K": 0, "M": 0, "F": 0, "R": 0})
     rich = cost_with({"K": 1, "M": 1, "F": len(cfg.joint_route.ffn_width_tiers) - 1, "R": 3})
     assert cheap < baseline < rich
+
+
+def test_hard_selection_is_straight_through():
+    """Training and deployment must be the same policy.
+
+    A bare argmax carries no gradient, so the controller could not learn; Gumbel
+    sampling carries gradient but trains a policy that is not the one deployed.
+    At 82M that gap was 5.3% of compute -- the sampled policy sat on budget while
+    its argmax counterpart overspent, because argmax always takes the expensive
+    side of a distribution sampling only visits sometimes.
+    """
+    torch.manual_seed(41)
+    cfg = Config.tiny()
+    m = Model(cfg)
+    m.train()
+    ids = torch.randint(0, cfg.vocab_size, (2, 16))
+
+    out = m(ids, route_state=RouteState(hard=True))
+    grad = torch.autograd.grad(
+        out.expected_cost, m.model.controller.head["F"].weight, allow_unused=True
+    )[0]
+    assert grad is not None and grad.abs().sum() > 0, "hard selection lost its gradient"
+
+    # and the forward pass is still a one-hot, not a softened stand-in
+    onehot = out.joint_decisions[0].hard_modes["F"]
+    assert torch.allclose(onehot.sum(-1), torch.ones_like(onehot.sum(-1)), atol=1e-6)
+    assert torch.minimum(onehot.abs(), (onehot - 1).abs()).max() < 1e-6
+
+
+def test_price_closes_the_budget_for_the_deployed_policy():
+    """Solving the price must put the *argmax* cost on target, not a sampled one."""
+    from route_eval import solve_batch_price, _cost_at_price
+
+    torch.manual_seed(43)
+    cfg = Config.tiny()
+    m = Model(cfg)
+    m.train()
+    ids = torch.randint(0, cfg.vocab_size, (2, 32))
+    costs = OrganCosts(cfg, 32)
+
+    price = 0.0
+    for _ in range(4):
+        out = m(ids, route_state=RouteState(price=price, hard=True))
+        price = solve_batch_price(out.joint_decisions, costs.fixed_share,
+                                  float(out.cost_target), price)
+    achieved = _cost_at_price(out.joint_decisions, costs.fixed_share, price, price)
+    assert abs(achieved - out.cost_target) < 0.02, (achieved, out.cost_target)

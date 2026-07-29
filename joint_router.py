@@ -132,9 +132,13 @@ class JointRouteController(nn.Module):
             onehot = torch.zeros_like(adjusted).scatter_(-1, index, 1)
             probs = onehot
         elif state.hard or not self.training:
-            onehot = torch.zeros_like(adjusted).scatter_(
-                -1, adjusted.argmax(-1, keepdim=True), 1
-            )
+            # Straight-through argmax: the forward pass is the deployed policy
+            # and the backward pass is the softmax.  A bare scatter_ would carry
+            # no gradient at all, so the controller could never learn from a
+            # hard-selected run.
+            index = adjusted.argmax(-1, keepdim=True)
+            hard = torch.zeros_like(adjusted).scatter_(-1, index, 1)
+            onehot = hard + probs - probs.detach()
         else:
             onehot = F.gumbel_softmax(
                 adjusted, tau=self.config.joint_route.temperature, hard=True, dim=-1

@@ -313,10 +313,17 @@ def train(args: argparse.Namespace) -> None:
                 dtype=dtype,
                 enabled=(dtype != torch.float32 and device.type != "cpu"),
             ):
+                # Train with the *deployed* policy.  Gumbel sampling trains one
+                # policy and deploys another: at 82M the sampled policy sat on
+                # budget while its argmax counterpart spent 5.3% more, because
+                # argmax always takes the expensive side of a distribution that
+                # sampling only visits sometimes.  Selecting by argmax with a
+                # straight-through gradient makes the trained and deployed
+                # policies the same object, so one price closes both.
                 output = model(
                     ids, labels=ids,
                     route_state=RouteState(
-                        price=route_price,
+                        price=route_price, hard=True,
                         force_fixed=model_cfg.joint_route.force_fixed,
                     ),
                 )
@@ -368,19 +375,14 @@ def train(args: argparse.Namespace) -> None:
             # the controller can overspend faster than slow ascent can answer,
             # and an unclosed budget voids the whole comparison.
             price_costs = OrganCosts(model_cfg, train_cfg.sequence_length)
-            # The price is solved on the argmax policy, but training *samples*
-            # from Gumbel, so the executed cost lands below the solved one.  An
-            # integral term on the realised error moves the solver's target until
-            # the sampled cost -- the compute actually spent -- sits on budget.
-            # Without it the arm quietly underspends and the equal-FLOPs premise
-            # of the whole comparison fails.
-            price_offset += train_cfg.price_offset_gain * (
-                float(output.cost_target) - cost_sum
-            )
-            price_offset = max(-0.5, min(0.5, price_offset))
+            # The solver already targets the argmax policy, and training now
+            # *is* the argmax policy, so no correction term is needed.  The
+            # integral term that used to live here was driven by the sampled
+            # cost and therefore pulled the price away from closing the budget
+            # for the policy that actually gets deployed.
             route_price = solve_batch_price(
                 output.joint_decisions, price_costs.fixed_share,
-                float(output.cost_target) + price_offset, route_price,
+                float(output.cost_target), route_price,
             )
         step += 1
         tokens_done += train_cfg.tokens_per_step

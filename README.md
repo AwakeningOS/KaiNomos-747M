@@ -74,7 +74,7 @@ the policy that was trained.
 
 ## Training data
 
-`KaiNomos-DataMix-2B-v1` — a fixed-ratio 2.5B-token pool built for this model.
+`KaiNomos-DataMix-2.5B-v1` — a fixed-ratio 2.5B-token pool built for this model.
 
 | Share | Source |
 |---|---|

@@ -105,7 +105,7 @@ MUDD の source 数が使われていた。force_fixed のコストが目標と 
 
 - 初期 checkpoint は 82M Base と Adaptive 版の完走後、validation NLL が低い方に決める
 - tokenizer は 32,768 SentencePiece Unigram + weight tying へ交換（測定で決定、下記）
-- 本番データは `K3Mini-DataMix-2B-v1`（`data_mix.py`）
+- 本番データは `KaiNomos-DataMix-2.5B-v1`（`data_mix.py`）
 
 ### tokenizer 交換の根拠（実測）
 

@@ -23,6 +23,11 @@ REST_MINUTES="${REST_MINUTES:-10}"
 DATA="data/pool"
 INIT="runs/kainomos_110m_init.pt"
 
+# Telemetry, so a repeat of the 2026-07-29 hard reset leaves evidence.
+./gpu_watch.sh runs/gpu_telemetry.csv 15 &
+WATCH=$!
+trap 'kill $WATCH 2>/dev/null' EXIT
+
 for arm in base adaptive; do
   if [ "$arm" != "base" ]; then
     echo "=== resting the GPU for ${REST_MINUTES} min ==="

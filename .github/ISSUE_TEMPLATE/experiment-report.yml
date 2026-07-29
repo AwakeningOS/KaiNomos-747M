@@ -1,0 +1,58 @@
+name: Experiment report
+description: Register a reproducible result, including negative results
+title: "[EXP] EXP-"
+labels:
+  - experiment
+body:
+  - type: input
+    id: experiment_id
+    attributes:
+      label: Experiment ID
+      placeholder: EXP-0001
+    validations:
+      required: true
+  - type: textarea
+    id: claim
+    attributes:
+      label: Pre-registered claim
+      description: What did you predict before evaluating the held-out result?
+    validations:
+      required: true
+  - type: textarea
+    id: provenance
+    attributes:
+      label: Reproducibility record
+      description: Include commit, checkpoint, tokenizer, and data-manifest hashes.
+    validations:
+      required: true
+  - type: textarea
+    id: training
+    attributes:
+      label: Training and compute
+      description: Include GPU, seed, tokens, FLOPs, executed cost, VRAM, and wall time.
+    validations:
+      required: true
+  - type: textarea
+    id: results
+    attributes:
+      label: Results
+      description: Include validation/test NLL, throughput, logs, and uncertainty or repeated runs.
+    validations:
+      required: true
+  - type: textarea
+    id: failures
+    attributes:
+      label: Bugs, failures, and deviations
+      description: Record invalidated runs and departures from the registered protocol.
+    validations:
+      required: true
+  - type: dropdown
+    id: verdict
+    attributes:
+      label: Verdict
+      options:
+        - adopted
+        - rejected
+        - inconclusive
+    validations:
+      required: true

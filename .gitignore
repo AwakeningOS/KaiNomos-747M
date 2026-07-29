@@ -1,0 +1,6 @@
+data/
+runs/
+reports/
+__pycache__/
+*.pyc
+*.pt

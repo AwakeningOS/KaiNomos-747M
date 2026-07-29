@@ -1,6 +1,6 @@
 # Contributing
 
-K3Mini welcomes reproducible architecture experiments, careful bug reports,
+KaiNomos welcomes reproducible architecture experiments, careful bug reports,
 negative results, and documentation improvements.
 
 ## Before proposing a mechanism

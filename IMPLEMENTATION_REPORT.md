@@ -94,18 +94,22 @@ MUDD の source 数が使われていた。force_fixed のコストが目標と 
 
 ## 移植
 
-`migrate_82m_to_110m.py`。
+`migrate_82m_to_110m.py`（語彙変換の実装本体は `migrate_vocab.py`）。
 
-- 既存13層 → 同種の層へそのままコピー（KDA と MLA を跨いだコピーは禁止し、テストで固定）
-- FFN 2432→2816：既存を完全コピー、追加channelは新規初期化のうえ down_proj を 0.1 倍
-- 新規3層：同種の後半層から循環コピーし、attention/FFN の出力projectionを 0.1 倍
-- MUDD / Delta / controller / MTP は各自の identity 初期化を保持
+- 82M checkpointから、名前・形状・役割が一致する既存層だけをコピー
+- KDAとMLAを跨いだコピー、形状の違うFFNの部分コピー、新規層へのcloneは禁止
+- 追加3層 / MUDD-QKV / Delta Block / controller / MTPは110M側の新規初期化を保持
+- 旧語彙との完全一致は旧input embeddingをコピー
+- 旧token列へ可逆に分解できる新tokenは、対応する旧input embeddingの平均で初期化
+- それ以外の新語彙行は通常初期化
+- LM headは新embeddingとweight tyingし、旧LM headは独立tensorとして移植しない
+- JointRouteの機構・設定・経路選択ロジックは変更しない
 
 ## 未確定・次の作業
 
-- 初期 checkpoint は 82M Base と Adaptive 版の完走後、validation NLL が低い方に決める
-- tokenizer は 32,768 SentencePiece Unigram + weight tying へ交換（測定で決定、下記）
-- 本番データは `KaiNomos-DataMix-2.5B-v1`（`data_mix.py`）
+- 移植元は82M BaseとJoint++を同一validation/test splitで評価し、NLLが低い方に決める。train lossだけでは選ばない
+- tokenizerはKaiNomos-110M専用の32,768 SentencePiece Unigram + weight tying。82M側は変更しない
+- 本番データは `KaiNomos-DataMix-v1`、正確には1,988,270,624 tokens（`data/pool/manifest.json`）
 
 ### tokenizer 交換の根拠（実測）
 

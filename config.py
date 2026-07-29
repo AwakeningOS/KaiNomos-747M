@@ -102,7 +102,9 @@ class JointRouteConfig:
 
 @dataclass
 class K3MiniPlusPlusPlusConfig:
-    vocab_size: int = 16384
+    # KaiNomos-110M has its own 32,768-piece SentencePiece tokenizer. The
+    # source 82M model keeps its original 16,384-piece tokenizer unchanged.
+    vocab_size: int = 32768
     hidden_size: int = 512
     num_hidden_layers: int = 16
     layer_pattern: tuple[str, ...] = LAYER_PATTERN
@@ -111,9 +113,9 @@ class K3MiniPlusPlusPlusConfig:
     rms_norm_eps: float = 1e-6
     attn_res_block_size: int = 4
     initializer_range: float = 0.02
-    # The 82M model keeps a separate LM head; weight tying is on the list of
-    # things this version must not change.
-    tie_word_embeddings: bool = False
+    # The 110M vocabulary is tied. During migration only the old input
+    # embedding is reused; the old tokenizer-specific LM head is not copied.
+    tie_word_embeddings: bool = True
     # "auto" uses the FLA Triton kernels when available, "reference" the
     # sequential PyTorch path used by the CPU tests
     kda_impl: str = "auto"

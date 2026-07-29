@@ -74,7 +74,9 @@ the policy that was trained.
 
 ## Training data
 
-`KaiNomos-DataMix-2.5B-v1` — a fixed-ratio 2.5B-token pool built for this model.
+`KaiNomos-DataMix-v1` — a fixed-ratio pool of 1,988,270,624 tokens built
+for this model. The ratios below are exact; the pool stops where the scarcest
+source runs out rather than drifting off the mixture to reach a round number.
 
 | Share | Source |
 |---|---|

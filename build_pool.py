@@ -42,9 +42,20 @@ SOURCE_KIND = {
     "ja_web": "ja", "ja_paraphrase": "ja", "ja_instruct": "ja",
     "ja_wikipedia_reference": "ja", "en_edu": "en", "math": "math",
 }
-# Within Japanese, the design's shares of the whole mix.
-JA_SHARE = {"ja_web": 0.35, "ja_paraphrase": 0.20,
-            "ja_instruct": 0.10, "ja_wikipedia_reference": 0.10}
+# Each source's share *of the whole mix*, exactly as designed.  Code is not an
+# equal split across languages: at 110M the useful thing to learn is the
+# correspondence between prose and code, so Python and Markdown dominate and no
+# systems language gets much room.
+SOURCE_SHARE = {
+    "ja_web": 0.35, "ja_paraphrase": 0.20,
+    "ja_instruct": 0.10, "ja_wikipedia_reference": 0.10,
+    "en_edu": 0.10,
+    "math": 0.05,
+    "code_python": 0.10 * 0.50, "code_markdown": 0.10 * 0.20,
+    "code_shell": 0.10 * 0.08, "code_sql": 0.10 * 0.07,
+    "code_javascript": 0.10 * 0.06, "code_typescript": 0.10 * 0.04,
+    "code_c": 0.10 * 0.03, "code_cpp": 0.10 * 0.02,
+}
 
 
 def kind_of(source: str) -> str:
@@ -52,18 +63,22 @@ def kind_of(source: str) -> str:
 
 
 def source_quota(sources: list[str], total: int = TARGET_TOKENS) -> dict[str, int]:
-    """Token budget per source, from the design ratios."""
-    quota: dict[str, int] = {}
-    code_sources = [s for s in sources if kind_of(s) == "code"]
-    for source in sources:
-        kind = kind_of(source)
-        if kind == "ja":
-            quota[source] = int(total * JA_SHARE.get(source, 0.0))
-        elif kind == "code":
-            quota[source] = int(total * KIND_RATIO["code"] / max(len(code_sources), 1))
-        else:
-            quota[source] = int(total * KIND_RATIO[kind])
-    return quota
+    """Token budget per source, from the design shares."""
+    return {s: int(total * SOURCE_SHARE.get(s, 0.0)) for s in sources}
+
+
+def feasible_total(available: dict[str, int], target: int = TARGET_TOKENS) -> int:
+    """Largest pool that keeps the designed ratios exactly.
+
+    A source that runs out does not just shrink itself: holding the ratios means
+    every other source shrinks with it.  Reporting a pool that silently drifted
+    off its ratios would be worse -- the mixture is the design.
+    """
+    limits = [target]
+    for source, share in SOURCE_SHARE.items():
+        if share > 0 and source in available:
+            limits.append(int(available[source] / share))
+    return min(limits)
 
 
 def assign_split(document_id: str) -> str:
@@ -82,6 +97,34 @@ def iter_documents(root: Path):
                 yield json.loads(line), shard.name
 
 
+def measure_available(root: Path, sp, sample_documents: int = 300) -> dict[str, int]:
+    """Tokens each source can supply, from one pass with a per-source sample.
+
+    A single pass collects every source's document count and character total,
+    plus a small text sample; tokens-per-character then converts the two into an
+    availability estimate.  Re-reading the corpus once per source would take
+    longer than the tokenisation it is meant to plan.
+    """
+    documents: Counter = Counter()
+    characters: Counter = Counter()
+    samples: dict[str, list[str]] = defaultdict(list)
+    for document, _ in iter_documents(root):
+        source = document.get("source", "")
+        text = document["text"]
+        documents[source] += 1
+        characters[source] += len(text)
+        if len(samples[source]) < sample_documents:
+            samples[source].append(text)
+
+    available: dict[str, int] = {}
+    for source, texts in samples.items():
+        tokens = sum(len(x) for x in sp.encode(texts))
+        chars = sum(len(x) for x in texts)
+        rate = tokens / max(chars, 1)
+        available[source] = int(characters[source] * rate)
+    return available
+
+
 def build(root: Path, out_dir: Path, tokenizer_path: Path,
           total_tokens: int = TARGET_TOKENS) -> dict:
     import sentencepiece as spm
@@ -92,8 +135,16 @@ def build(root: Path, out_dir: Path, tokenizer_path: Path,
         raise RuntimeError("tokenizer has no <|eod|> piece")
 
     sources = sorted({d.get("source", "") for d, _ in iter_documents(root)})
-    quota = source_quota(sources, total_tokens)
-    print(json.dumps({"quota": quota}, indent=2))
+    available = measure_available(root, sp)
+    feasible = feasible_total(available, total_tokens)
+    quota = source_quota(sources, feasible)
+    binding = min(((available[s] / SOURCE_SHARE[s], s) for s in sources
+                   if SOURCE_SHARE.get(s, 0) > 0), default=(0, ""))[1]
+    print(json.dumps({
+        "requested_total": total_tokens, "feasible_total": feasible,
+        "binding_source": binding,
+        "available": available, "quota": quota,
+    }, indent=2, ensure_ascii=False))
 
     out_dir.mkdir(parents=True, exist_ok=True)
     handles = {s: open(out_dir / f"{s}.bin", "wb") for s in ("train", "validation", "test")}
@@ -155,12 +206,13 @@ def build(root: Path, out_dir: Path, tokenizer_path: Path,
     total = max(sum(achieved.values()), 1)
 
     manifest = {
-        "name": "KaiNomos-DataMix-2.5B-v1",
+        "name": "KaiNomos-DataMix-v1",
         "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "tokenizer": str(tokenizer_path),
         "tokenizer_sha256": sha256(tokenizer_path),
         "vocab_size": sp.get_piece_size(),
-        "target_tokens": total_tokens,
+        "requested_target_tokens": total_tokens,
+        "total_tokens": sum(counts.values()),
         "tokens_by_source": dict(per_source),
         "documents_by_source": dict(per_source_docs),
         "quota_by_source": quota,

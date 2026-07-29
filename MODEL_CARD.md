@@ -10,7 +10,7 @@ tags:
   - mla
 ---
 
-# K3Mini-110M
+# KaiNomos-110M
 
 > **Architecture preview — not a pretrained model yet.**
 >
@@ -18,11 +18,11 @@ tags:
 > This page documents a tested 111M-parameter implementation and a
 > pre-registered Base-versus-Adaptive experiment. It is not ready for inference.
 
-K3Mini-110M asks whether selected architecture ideas from frontier-scale
+KaiNomos-110M asks whether selected architecture ideas from frontier-scale
 language models remain useful when reduced to a model that an individual can
 train on a single consumer GPU.
 
-- **Source and tests:** [AwakeningOS/K3Mini-110M on GitHub](https://github.com/AwakeningOS/K3Mini-110M)
+- **Source and tests:** [AwakeningOS/KaiNomos-110M on GitHub](https://github.com/AwakeningOS/KaiNomos-110M)
 - **Reference architecture:** [Kimi K3 technical report](https://arxiv.org/abs/2607.24653)
 - **KDA reference:** [Kimi Linear](https://arxiv.org/abs/2510.26692)
 - **Status:** implementation tested; full pre-training pending
@@ -42,7 +42,8 @@ of Kimi K3's capabilities.
 | Layer pattern | 12 KDA + 4 Gated MLA, repeating 3:1 |
 | Hidden size | 512 |
 | Attention heads | 8 |
-| Vocabulary size | 16,384 |
+| Vocabulary size | 32,768 (KaiNomos-110M-specific SentencePiece Unigram) |
+| Embedding / LM head | Weight tied |
 | Training context | 1,024 tokens |
 | FFN | SiTU-GLU with nested routed widths |
 | Modalities | Text only |
@@ -50,7 +51,7 @@ of Kimi K3's capabilities.
 | License for original code | Apache-2.0 |
 
 The public architecture configuration is available in
-[`k3mini-110m-architecture.json`](k3mini-110m-architecture.json).
+[`kainomos-110m-architecture.json`](kainomos-110m-architecture.json).
 
 ## Architecture
 
@@ -99,7 +100,7 @@ registered tolerance.
 
 ## Current validation
 
-The source repository currently records 26 passing tests covering:
+The source repository currently records 28 passing tests covering:
 
 - causal behavior;
 - finite forward, loss, gradient, and backward paths;
@@ -128,13 +129,11 @@ implementation diagnostics, not a quality benchmark.
 
 ## Training data
 
-No final training corpus is claimed yet.
-
-The current pre-training plan targets a fixed-ratio Japanese/English/code/math
-mixture assembled from Hugging Face datasets. Every source must pass a final
-license and redistribution review before training or release. The final model
-card will identify exact dataset revisions, tokenizer identity, split seed,
-document counts, token counts, filters, and manifest hashes.
+Training uses `KaiNomos-DataMix-v1`, a fixed-ratio
+Japanese/English/code/math pool containing exactly **1,988,270,624 tokens** in
+the KaiNomos tokenizer. Its train, validation, and test counts, source
+revisions, tokenizer hash, split seed, document counts, filters, and artifact
+hashes are recorded in `data/pool/manifest.json`.
 
 Raw training data will not be copied into this model repository.
 
@@ -198,7 +197,7 @@ that conclusion.
 - [x] CPU correctness and invariance tests
 - [x] single-GPU forward/backward/checkpoint smoke test
 - [x] public architecture configuration
-- [ ] tokenizer and tokenization pipeline
+- [x] tokenizer and tokenization pipeline
 - [ ] matched-compute Base pre-training
 - [ ] matched-compute Adaptive pre-training
 - [ ] held-out evaluation and compute audit
@@ -207,7 +206,7 @@ that conclusion.
 
 ## Attribution
 
-“Kimi” and “Kimi K3” refer to Moonshot AI's work. K3Mini-110M is independent
+“Kimi” and “Kimi K3” refer to Moonshot AI's work. KaiNomos-110M is independent
 and is not sponsored, endorsed, or maintained by Moonshot AI. Third-party
 papers, datasets, kernels, weights, and trademarks remain subject to their own
 terms.

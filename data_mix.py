@@ -1,4 +1,4 @@
-"""KaiNomos-DataMix-2.5B-v1: acquisition of the fixed-ratio pre-training mix.
+"""KaiNomos-DataMix-v1: acquisition of the fixed-ratio pre-training mix.
 
 Ratios are defined over tokens *in this project's tokenizer*, not over the token
 counts the sources advertise -- a corpus counted with a different tokenizer says
@@ -281,9 +281,9 @@ def write_manifest(root: Path, collector: "MixCollector") -> dict:
             **info,
         })
     manifest = {
-        "name": "KaiNomos-DataMix-2.5B-v1",
+        "name": "KaiNomos-DataMix-v1",
         "created_utc": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
-        "target_tokens": collector.total_tokens,
+        "requested_target_tokens": collector.total_tokens,
         "split_seed": SPLIT_SEED,
         "bytes_per_token_estimate": BYTES_PER_TOKEN,
         "stage_order": ["collect", "clean", "tokenizer", "minhash",

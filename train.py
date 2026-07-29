@@ -211,6 +211,12 @@ def train(args: argparse.Namespace) -> None:
     device = torch.device(args.device)
     model_cfg = K3MiniConfig()
     train_cfg = TrainConfig()
+    # The vocabulary is a property of the pool, not of the model defaults: the
+    # tokenizer changed with the data and the two must not drift apart.
+    model_cfg.vocab_size = json.loads(
+        (Path(args.data_dir) / "manifest.json").read_text())["vocab_size"]
+    model_cfg.tie_word_embeddings = True
+
     # Both arms are the same supernet; the only difference is force_fixed.
     model_cfg.joint_route.enabled = True
     model_cfg.joint_route.force_fixed = getattr(args, "arm", "adaptive") == "base"

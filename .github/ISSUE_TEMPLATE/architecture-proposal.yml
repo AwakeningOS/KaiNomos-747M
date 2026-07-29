@@ -1,0 +1,41 @@
+name: Architecture proposal
+description: Propose a falsifiable small-model architecture experiment
+title: "[PROPOSAL] "
+labels:
+  - architecture
+body:
+  - type: textarea
+    id: mechanism
+    attributes:
+      label: Proposed mechanism
+      description: Describe the smallest precise change to the current Base.
+    validations:
+      required: true
+  - type: textarea
+    id: prior_work
+    attributes:
+      label: Prior work
+      description: Link papers, repositories, and related experiments you checked.
+    validations:
+      required: true
+  - type: textarea
+    id: prediction
+    attributes:
+      label: Prediction and mechanism
+      description: State what metric should move, in which direction, and why.
+    validations:
+      required: true
+  - type: textarea
+    id: controls
+    attributes:
+      label: Controls
+      description: Explain how data, seeds, tokens, parameters, and compute will be controlled.
+    validations:
+      required: true
+  - type: textarea
+    id: falsification
+    attributes:
+      label: Falsification criterion
+      description: What result would make you reject or revise the idea?
+    validations:
+      required: true

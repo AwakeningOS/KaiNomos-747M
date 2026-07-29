@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Datasets and tokenizer artifacts
+data/
+*.bin
+*.npy
+*.npz
+tokenizer/
+
+# Training artifacts and model weights
+runs/*
+!runs/gpu_smoke.json
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.gguf
+*.tmp
+
+# Logs and generated reports
+*.log
+wandb/

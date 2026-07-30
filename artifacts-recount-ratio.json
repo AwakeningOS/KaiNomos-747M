@@ -1,122 +1,845 @@
 {
  "old_tokenizer": "data/tokenizer/kainomos.model",
  "new_tokenizer": "/run/media/youthk/HD-LCU3/DoubleDragon-DataMix-v2/tokenizer/final/doubledragon-datamix-v2-49152.model",
- "sample_documents_per_source": 2000,
- "seed": 11,
- "note": "sample-based ratios, not a full recount; rescale old counts by `ratio`",
+ "documents_requested_per_source": 2000,
+ "max_files_per_source": 12,
+ "row_groups_per_file": 4,
+ "sampling": "deterministic and spread: files strided evenly over all of them, row groups evenly spaced rather than from 0, and byte offsets spread within seekable files. Gzip shards cannot be seeked, so those spread across shards with a per-shard record offset instead.",
+ "caveat": "sample-based ratios, not a full recount. Rescale old counts by `ratio`; check `ratio_min`/`ratio_max`/`ratio_stdev` before trusting the aggregate.",
+ "succeeded": [
+  "HuggingFaceFW-finepdfs",
+  "HuggingFaceTB-dclm-edu",
+  "HuggingFaceTB-finemath",
+  "PleIAs-Japanese-PD",
+  "kasys-ReCaRe",
+  "llm-jp-continuation",
+  "llm-jp-scaling-data-constrained-llms",
+  "stack-edu-continuation-pilot",
+  "stack-edu-continuation-r3",
+  "wikimedia-wikipedia-20231101-ja",
+  "wikimedia-wikisource-20231201-ja"
+ ],
+ "failed": [
+  {
+   "source": "HuggingFaceFW-finepdfs-download",
+   "reason": "no parquet or jsonl files found",
+   "files_found": 0
+  }
+ ],
  "sources": {
   "HuggingFaceFW-finepdfs": {
-   "documents": 2000,
-   "characters": 7104227,
-   "old_tokens": 4522482,
-   "new_tokens": 4053718,
-   "old_chars_per_token": 1.5708690493406055,
-   "new_chars_per_token": 1.7525212656627818,
-   "ratio": 0.8963480672781008,
-   "reduction_percent": 10.36519327218992
+   "ok": true,
+   "extraction": "parquet row groups spread across every file",
+   "files_found": 6,
+   "files_sampled": 6,
+   "documents": 1992,
+   "characters": 11534354,
+   "old_tokens": 6877613,
+   "new_tokens": 6357341,
+   "old_chars_per_token": 1.6770868032266428,
+   "new_chars_per_token": 1.8143362138353125,
+   "ratio": 0.9243528241557063,
+   "reduction_percent": 7.564717584429371,
+   "ratio_min": 0.8500072255826916,
+   "ratio_max": 0.9679891628745165,
+   "ratio_stdev": 0.03895220702187885,
+   "per_file": [
+    {
+     "file": "000_00000.parquet",
+     "documents": 332,
+     "characters": 2091184,
+     "old_tokens": 1224679,
+     "new_tokens": 1185476,
+     "ratio": 0.9679891628745165
+    },
+    {
+     "file": "000_00001.parquet",
+     "documents": 332,
+     "characters": 2788957,
+     "old_tokens": 1562054,
+     "new_tokens": 1450093,
+     "ratio": 0.9283245009455499
+    },
+    {
+     "file": "000_00002.parquet",
+     "documents": 332,
+     "characters": 1550802,
+     "old_tokens": 997295,
+     "new_tokens": 906686,
+     "ratio": 0.9091452378684342
+    },
+    {
+     "file": "000_00003.parquet",
+     "documents": 332,
+     "characters": 2135600,
+     "old_tokens": 1198809,
+     "new_tokens": 1115601,
+     "ratio": 0.9305911116783407
+    },
+    {
+     "file": "000_00004.parquet",
+     "documents": 332,
+     "characters": 1071223,
+     "old_tokens": 775024,
+     "new_tokens": 658776,
+     "ratio": 0.8500072255826916
+    },
+    {
+     "file": "000_00005.parquet",
+     "documents": 332,
+     "characters": 1896588,
+     "old_tokens": 1119752,
+     "new_tokens": 1040709,
+     "ratio": 0.9294102622723603
+    }
+   ]
   },
   "HuggingFaceFW-finepdfs-download": {
-   "error": "no readable parquet text column"
+   "ok": false,
+   "reason": "no parquet or jsonl files found",
+   "files_found": 0
   },
   "HuggingFaceTB-dclm-edu": {
+   "ok": true,
+   "extraction": "parquet row groups spread across every file",
+   "files_found": 5,
+   "files_sampled": 5,
    "documents": 2000,
-   "characters": 11598056,
-   "old_tokens": 3247608,
-   "new_tokens": 3131758,
-   "old_chars_per_token": 3.5712610635273716,
-   "new_chars_per_token": 3.7033691619850577,
-   "ratio": 0.9643275912610143,
-   "reduction_percent": 3.5672408738985695
+   "characters": 12014455,
+   "old_tokens": 3364310,
+   "new_tokens": 3245690,
+   "old_chars_per_token": 3.5711498048634045,
+   "new_chars_per_token": 3.701664361044955,
+   "ratio": 0.9647416557927183,
+   "reduction_percent": 3.525834420728169,
+   "ratio_min": 0.963007615230461,
+   "ratio_max": 0.9665705064122704,
+   "ratio_stdev": 0.0014172997573875935,
+   "per_file": [
+    {
+     "file": "000_00000.parquet",
+     "documents": 400,
+     "characters": 2163587,
+     "old_tokens": 603184,
+     "new_tokens": 582081,
+     "ratio": 0.9650139924135919
+    },
+    {
+     "file": "000_00001.parquet",
+     "documents": 400,
+     "characters": 2445692,
+     "old_tokens": 700220,
+     "new_tokens": 676812,
+     "ratio": 0.9665705064122704
+    },
+    {
+     "file": "000_00002.parquet",
+     "documents": 400,
+     "characters": 2838604,
+     "old_tokens": 791055,
+     "new_tokens": 763559,
+     "ratio": 0.9652413548994697
+    },
+    {
+     "file": "000_00003.parquet",
+     "documents": 400,
+     "characters": 2242123,
+     "old_tokens": 623750,
+     "new_tokens": 600676,
+     "ratio": 0.963007615230461
+    },
+    {
+     "file": "000_00004.parquet",
+     "documents": 400,
+     "characters": 2324449,
+     "old_tokens": 646101,
+     "new_tokens": 622562,
+     "ratio": 0.9635676155895131
+    }
+   ]
   },
   "HuggingFaceTB-finemath": {
-   "documents": 2000,
-   "characters": 9948724,
-   "old_tokens": 3427880,
-   "new_tokens": 3322077,
-   "old_chars_per_token": 2.9022964631200625,
-   "new_chars_per_token": 2.9947301040884966,
-   "ratio": 0.9691345671377061,
-   "reduction_percent": 3.086543286229393
+   "ok": true,
+   "extraction": "parquet row groups spread across every file",
+   "files_found": 16,
+   "files_sampled": 12,
+   "documents": 1968,
+   "characters": 9302087,
+   "old_tokens": 3233032,
+   "new_tokens": 3132826,
+   "old_chars_per_token": 2.877202267097882,
+   "new_chars_per_token": 2.969231933085336,
+   "ratio": 0.9690055650547226,
+   "reduction_percent": 3.0994434945277427,
+   "ratio_min": 0.9654295411097917,
+   "ratio_max": 0.9735029050153001,
+   "ratio_stdev": 0.0022669848502737213,
+   "per_file": [
+    {
+     "file": "train-00000-of-00064.parquet",
+     "documents": 164,
+     "characters": 815329,
+     "old_tokens": 273568,
+     "new_tokens": 264947,
+     "ratio": 0.9684868113229618
+    },
+    {
+     "file": "train-00001-of-00064.parquet",
+     "documents": 164,
+     "characters": 709747,
+     "old_tokens": 237486,
+     "new_tokens": 229276,
+     "ratio": 0.9654295411097917
+    },
+    {
+     "file": "train-00003-of-00064.parquet",
+     "documents": 164,
+     "characters": 732428,
+     "old_tokens": 274181,
+     "new_tokens": 266916,
+     "ratio": 0.9735029050153001
+    },
+    {
+     "file": "train-00004-of-00064.parquet",
+     "documents": 164,
+     "characters": 708789,
+     "old_tokens": 232336,
+     "new_tokens": 225543,
+     "ratio": 0.9707621720267199
+    },
+    {
+     "file": "train-00005-of-00064.parquet",
+     "documents": 164,
+     "characters": 860308,
+     "old_tokens": 310443,
+     "new_tokens": 301659,
+     "ratio": 0.9717049506672722
+    },
+    {
+     "file": "train-00007-of-00064.parquet",
+     "documents": 164,
+     "characters": 786952,
+     "old_tokens": 284334,
+     "new_tokens": 275426,
+     "ratio": 0.9686706479000049
+    },
+    {
+     "file": "train-00008-of-00064.parquet",
+     "documents": 164,
+     "characters": 839445,
+     "old_tokens": 295178,
+     "new_tokens": 286071,
+     "ratio": 0.9691474296864943
+    },
+    {
+     "file": "train-00010-of-00064.parquet",
+     "documents": 164,
+     "characters": 781706,
+     "old_tokens": 263690,
+     "new_tokens": 255524,
+     "ratio": 0.969031817664682
+    },
+    {
+     "file": "train-00011-of-00064.parquet",
+     "documents": 164,
+     "characters": 890707,
+     "old_tokens": 303805,
+     "new_tokens": 293614,
+     "ratio": 0.9664554566251379
+    },
+    {
+     "file": "train-00012-of-00064.parquet",
+     "documents": 164,
+     "characters": 587514,
+     "old_tokens": 201411,
+     "new_tokens": 195234,
+     "ratio": 0.9693313672043732
+    },
+    {
+     "file": "train-00014-of-00064.parquet",
+     "documents": 164,
+     "characters": 778217,
+     "old_tokens": 287090,
+     "new_tokens": 278124,
+     "ratio": 0.9687693754571737
+    },
+    {
+     "file": "train-00015-of-00064.parquet",
+     "documents": 164,
+     "characters": 810945,
+     "old_tokens": 269510,
+     "new_tokens": 260492,
+     "ratio": 0.9665392749805202
+    }
+   ]
   },
   "PleIAs-Japanese-PD": {
+   "ok": true,
+   "extraction": "parquet row groups spread across every file",
+   "files_found": 8,
+   "files_sampled": 8,
    "documents": 2000,
-   "characters": 56613186,
-   "old_tokens": 49470575,
-   "new_tokens": 48245331,
-   "old_chars_per_token": 1.1443809981994346,
-   "new_chars_per_token": 1.1734438302433867,
-   "ratio": 0.9752328732787117,
-   "reduction_percent": 2.4767126721288335
+   "characters": 57407351,
+   "old_tokens": 50130506,
+   "new_tokens": 48893016,
+   "old_chars_per_token": 1.1451580201484501,
+   "new_chars_per_token": 1.174142151508919,
+   "ratio": 0.9753146317733158,
+   "reduction_percent": 2.4685368226684212,
+   "ratio_min": 0.9734612594799773,
+   "ratio_max": 0.9771244147778029,
+   "ratio_stdev": 0.0014083400057930114,
+   "per_file": [
+    {
+     "file": "japan_pd_001.parquet",
+     "documents": 250,
+     "characters": 7672525,
+     "old_tokens": 6591414,
+     "new_tokens": 6416603,
+     "ratio": 0.9734789834169117
+    },
+    {
+     "file": "japan_pd_002.parquet",
+     "documents": 250,
+     "characters": 7311930,
+     "old_tokens": 6485998,
+     "new_tokens": 6337627,
+     "ratio": 0.9771244147778029
+    },
+    {
+     "file": "japan_pd_003.parquet",
+     "documents": 250,
+     "characters": 6872737,
+     "old_tokens": 5932151,
+     "new_tokens": 5784393,
+     "ratio": 0.9750920028839455
+    },
+    {
+     "file": "japan_pd_004.parquet",
+     "documents": 250,
+     "characters": 7476177,
+     "old_tokens": 6468006,
+     "new_tokens": 6313940,
+     "ratio": 0.9761802942050456
+    },
+    {
+     "file": "japan_pd_005.parquet",
+     "documents": 250,
+     "characters": 6602160,
+     "old_tokens": 5773748,
+     "new_tokens": 5620520,
+     "ratio": 0.9734612594799773
+    },
+    {
+     "file": "japan_pd_006.parquet",
+     "documents": 250,
+     "characters": 7209095,
+     "old_tokens": 6280223,
+     "new_tokens": 6129461,
+     "ratio": 0.9759941645384248
+    },
+    {
+     "file": "japan_pd_007.parquet",
+     "documents": 250,
+     "characters": 7239136,
+     "old_tokens": 6407115,
+     "new_tokens": 6243263,
+     "ratio": 0.9744265554777775
+    },
+    {
+     "file": "japan_pd_008.parquet",
+     "documents": 250,
+     "characters": 7023591,
+     "old_tokens": 6191851,
+     "new_tokens": 6047209,
+     "ratio": 0.9766399417557043
+    }
+   ]
   },
   "kasys-ReCaRe": {
+   "ok": true,
+   "extraction": "byte offsets spread across every file",
+   "files_found": 1,
+   "files_sampled": 1,
    "documents": 2000,
-   "characters": 403628,
-   "old_tokens": 254826,
-   "new_tokens": 223469,
-   "old_chars_per_token": 1.5839357051478264,
-   "new_chars_per_token": 1.8061923577766938,
-   "ratio": 0.8769474072504375,
-   "reduction_percent": 12.30525927495625
+   "characters": 1805112,
+   "old_tokens": 1078306,
+   "new_tokens": 897641,
+   "old_chars_per_token": 1.6740257403742538,
+   "new_chars_per_token": 2.0109509258155542,
+   "ratio": 0.8324547948356033,
+   "reduction_percent": 16.754520516439676,
+   "ratio_min": 0.8324547948356033,
+   "ratio_max": 0.8324547948356033,
+   "ratio_stdev": 0.0,
+   "per_file": [
+    {
+     "file": "corpus.jsonl",
+     "documents": 2000,
+     "characters": 1805112,
+     "old_tokens": 1078306,
+     "new_tokens": 897641,
+     "ratio": 0.8324547948356033
+    }
+   ]
   },
   "llm-jp-continuation": {
-   "documents": 2000,
-   "characters": 3556672,
-   "old_tokens": 1770551,
-   "new_tokens": 1687230,
-   "old_chars_per_token": 2.0087938726419066,
-   "new_chars_per_token": 2.1079947606431846,
-   "ratio": 0.9529406382532896,
-   "reduction_percent": 4.705936174671043
+   "ok": true,
+   "extraction": "all shards, per-shard record offset",
+   "files_found": 77,
+   "files_sampled": 12,
+   "documents": 1992,
+   "characters": 3210496,
+   "old_tokens": 1566806,
+   "new_tokens": 1511369,
+   "old_chars_per_token": 2.04907052947206,
+   "new_chars_per_token": 2.124230416264989,
+   "ratio": 0.9646178276059704,
+   "reduction_percent": 3.538217239402963,
+   "ratio_min": 0.9489108637023719,
+   "ratio_max": 0.9872787660134463,
+   "ratio_stdev": 0.014131584472525468,
+   "per_file": [
+    {
+     "file": "shard_00000.jsonl.gz",
+     "documents": 166,
+     "characters": 315893,
+     "old_tokens": 159087,
+     "new_tokens": 151905,
+     "ratio": 0.9548548907201719
+    },
+    {
+     "file": "shard_00007.jsonl.gz",
+     "documents": 166,
+     "characters": 293774,
+     "old_tokens": 144610,
+     "new_tokens": 137222,
+     "ratio": 0.9489108637023719
+    },
+    {
+     "file": "shard_00014.jsonl.gz",
+     "documents": 166,
+     "characters": 285689,
+     "old_tokens": 140070,
+     "new_tokens": 133238,
+     "ratio": 0.951224387806097
+    },
+    {
+     "file": "shard_00021.jsonl.gz",
+     "documents": 166,
+     "characters": 320369,
+     "old_tokens": 156860,
+     "new_tokens": 149721,
+     "ratio": 0.9544880785413745
+    },
+    {
+     "file": "shard_00028.jsonl.gz",
+     "documents": 166,
+     "characters": 314215,
+     "old_tokens": 156466,
+     "new_tokens": 149539,
+     "ratio": 0.9557284010583769
+    },
+    {
+     "file": "shard_00035.jsonl.gz",
+     "documents": 166,
+     "characters": 267882,
+     "old_tokens": 130285,
+     "new_tokens": 124340,
+     "ratio": 0.9543692673753694
+    },
+    {
+     "file": "shard_00000.jsonl.gz",
+     "documents": 166,
+     "characters": 221148,
+     "old_tokens": 106527,
+     "new_tokens": 104474,
+     "ratio": 0.9807278905817305
+    },
+    {
+     "file": "shard_00007.jsonl.gz",
+     "documents": 166,
+     "characters": 223822,
+     "old_tokens": 109312,
+     "new_tokens": 107117,
+     "ratio": 0.979919862412178
+    },
+    {
+     "file": "shard_00014.jsonl.gz",
+     "documents": 166,
+     "characters": 243688,
+     "old_tokens": 117176,
+     "new_tokens": 114625,
+     "ratio": 0.9782293302382741
+    },
+    {
+     "file": "shard_00021.jsonl.gz",
+     "documents": 166,
+     "characters": 220168,
+     "old_tokens": 103096,
+     "new_tokens": 100649,
+     "ratio": 0.9762648405369753
+    },
+    {
+     "file": "shard_00028.jsonl.gz",
+     "documents": 166,
+     "characters": 284801,
+     "old_tokens": 131614,
+     "new_tokens": 128257,
+     "ratio": 0.9744935949063169
+    },
+    {
+     "file": "shard_00035.jsonl.gz",
+     "documents": 166,
+     "characters": 219047,
+     "old_tokens": 111703,
+     "new_tokens": 110282,
+     "ratio": 0.9872787660134463
+    }
+   ]
   },
   "llm-jp-scaling-data-constrained-llms": {
-   "documents": 2000,
-   "characters": 3072467,
-   "old_tokens": 1532962,
-   "new_tokens": 1438500,
-   "old_chars_per_token": 2.0042682075615703,
-   "new_chars_per_token": 2.1358825165102537,
-   "ratio": 0.9383794249302984,
-   "reduction_percent": 6.162057506970164
+   "ok": true,
+   "extraction": "all shards, per-shard record offset",
+   "files_found": 9,
+   "files_sampled": 9,
+   "documents": 1998,
+   "characters": 2461082,
+   "old_tokens": 1249947,
+   "new_tokens": 1174494,
+   "old_chars_per_token": 1.9689490834411378,
+   "new_chars_per_token": 2.095440249162618,
+   "ratio": 0.9396350405257183,
+   "reduction_percent": 6.0364959474281665,
+   "ratio_min": 0.937871036401636,
+   "ratio_max": 0.9434708875070661,
+   "ratio_stdev": 0.0017202846279304792,
+   "per_file": [
+    {
+     "file": "ja_web_9b_shard_000.jsonl.gz",
+     "documents": 222,
+     "characters": 341548,
+     "old_tokens": 167313,
+     "new_tokens": 156932,
+     "ratio": 0.9379546120146074
+    },
+    {
+     "file": "ja_web_9b_shard_001.jsonl.gz",
+     "documents": 222,
+     "characters": 244125,
+     "old_tokens": 125310,
+     "new_tokens": 117809,
+     "ratio": 0.9401404516798341
+    },
+    {
+     "file": "ja_web_9b_shard_002.jsonl.gz",
+     "documents": 222,
+     "characters": 252538,
+     "old_tokens": 125910,
+     "new_tokens": 118449,
+     "ratio": 0.9407433881343817
+    },
+    {
+     "file": "ja_web_9b_shard_003.jsonl.gz",
+     "documents": 222,
+     "characters": 237860,
+     "old_tokens": 125969,
+     "new_tokens": 118256,
+     "ratio": 0.9387706499218061
+    },
+    {
+     "file": "ja_web_9b_shard_004.jsonl.gz",
+     "documents": 222,
+     "characters": 268231,
+     "old_tokens": 136891,
+     "new_tokens": 128592,
+     "ratio": 0.9393751232732612
+    },
+    {
+     "file": "ja_web_9b_shard_005.jsonl.gz",
+     "documents": 222,
+     "characters": 302684,
+     "old_tokens": 155982,
+     "new_tokens": 146291,
+     "ratio": 0.937871036401636
+    },
+    {
+     "file": "ja_web_9b_shard_006.jsonl.gz",
+     "documents": 222,
+     "characters": 274316,
+     "old_tokens": 140457,
+     "new_tokens": 132022,
+     "ratio": 0.9399460333055668
+    },
+    {
+     "file": "ja_web_9b_shard_007.jsonl.gz",
+     "documents": 222,
+     "characters": 256236,
+     "old_tokens": 127057,
+     "new_tokens": 119285,
+     "ratio": 0.9388306035873663
+    },
+    {
+     "file": "ja_web_9b_shard_008.jsonl.gz",
+     "documents": 222,
+     "characters": 283544,
+     "old_tokens": 145058,
+     "new_tokens": 136858,
+     "ratio": 0.9434708875070661
+    }
+   ]
   },
   "stack-edu-continuation-pilot": {
-   "documents": 2000,
-   "characters": 8396903,
-   "old_tokens": 2914413,
-   "new_tokens": 2900321,
-   "old_chars_per_token": 2.8811644060056003,
-   "new_chars_per_token": 2.8951633284729517,
-   "ratio": 0.9951647209918429,
-   "reduction_percent": 0.4835279008157056
+   "ok": true,
+   "extraction": "all shards, per-shard record offset",
+   "files_found": 6,
+   "files_sampled": 6,
+   "documents": 904,
+   "characters": 3451889,
+   "old_tokens": 1201059,
+   "new_tokens": 1195032,
+   "old_chars_per_token": 2.874037828283207,
+   "new_chars_per_token": 2.888532692011595,
+   "ratio": 0.9949819284481445,
+   "reduction_percent": 0.5018071551855519,
+   "ratio_min": 0.9931125117663777,
+   "ratio_max": 0.9964420267956079,
+   "ratio_stdev": 0.0018612780241574931,
+   "per_file": [
+    {
+     "file": "shard_00000.jsonl.gz",
+     "documents": 333,
+     "characters": 1301794,
+     "old_tokens": 456767,
+     "new_tokens": 455040,
+     "ratio": 0.9962190788739116
+    },
+    {
+     "file": "shard_00001.jsonl.gz",
+     "documents": 333,
+     "characters": 1446914,
+     "old_tokens": 496117,
+     "new_tokens": 492700,
+     "ratio": 0.9931125117663777
+    },
+    {
+     "file": "shard_00002.jsonl.gz",
+     "documents": 238,
+     "characters": 703181,
+     "old_tokens": 248175,
+     "new_tokens": 247292,
+     "ratio": 0.9964420267956079
+    }
+   ]
   },
   "stack-edu-continuation-r3": {
-   "documents": 2000,
-   "characters": 7017290,
-   "old_tokens": 2933748,
-   "new_tokens": 2940409,
-   "old_chars_per_token": 2.391919824061235,
-   "new_chars_per_token": 2.3865013336580048,
-   "ratio": 1.002270474492015,
-   "reduction_percent": -0.22704744920150066
+   "ok": true,
+   "extraction": "all shards, per-shard record offset",
+   "files_found": 232,
+   "files_sampled": 12,
+   "documents": 996,
+   "characters": 3387842,
+   "old_tokens": 1239235,
+   "new_tokens": 1237592,
+   "old_chars_per_token": 2.7338172340193747,
+   "new_chars_per_token": 2.7374465898292812,
+   "ratio": 0.9986741820558651,
+   "reduction_percent": 0.13258179441348883,
+   "ratio_min": 0.9162388224326063,
+   "ratio_max": 1.0308561675049093,
+   "ratio_stdev": 0.040030540295164396,
+   "per_file": [
+    {
+     "file": "shard_00000.jsonl.gz",
+     "documents": 166,
+     "characters": 440122,
+     "old_tokens": 178072,
+     "new_tokens": 178795,
+     "ratio": 1.0040601554427422
+    },
+    {
+     "file": "shard_00007.jsonl.gz",
+     "documents": 166,
+     "characters": 753571,
+     "old_tokens": 255718,
+     "new_tokens": 259712,
+     "ratio": 1.0156187675486277
+    },
+    {
+     "file": "shard_00012.jsonl.gz",
+     "documents": 166,
+     "characters": 639314,
+     "old_tokens": 241378,
+     "new_tokens": 248826,
+     "ratio": 1.0308561675049093
+    },
+    {
+     "file": "shard_00016.jsonl.gz",
+     "documents": 166,
+     "characters": 600177,
+     "old_tokens": 207993,
+     "new_tokens": 208045,
+     "ratio": 1.0002500084137447
+    },
+    {
+     "file": "shard_00037.jsonl.gz",
+     "documents": 166,
+     "characters": 605051,
+     "old_tokens": 203760,
+     "new_tokens": 202658,
+     "ratio": 0.9945916764821359
+    },
+    {
+     "file": "shard_00011.jsonl.gz",
+     "documents": 166,
+     "characters": 349607,
+     "old_tokens": 152314,
+     "new_tokens": 139556,
+     "ratio": 0.9162388224326063
+    }
+   ]
   },
   "wikimedia-wikipedia-20231101-ja": {
-   "documents": 2000,
-   "characters": 16728776,
-   "old_tokens": 10393939,
-   "new_tokens": 9681481,
-   "old_chars_per_token": 1.6094741368022267,
-   "new_chars_per_token": 1.727914974991946,
-   "ratio": 0.9314544755361754,
-   "reduction_percent": 6.854552446382456
+   "ok": true,
+   "extraction": "parquet row groups spread across every file",
+   "files_found": 15,
+   "files_sampled": 12,
+   "documents": 1968,
+   "characters": 3771412,
+   "old_tokens": 2371669,
+   "new_tokens": 2201402,
+   "old_chars_per_token": 1.5901932352280188,
+   "new_chars_per_token": 1.7131864148392706,
+   "ratio": 0.9282079413273944,
+   "reduction_percent": 7.179205867260563,
+   "ratio_min": 0.9219289827255278,
+   "ratio_max": 0.94034355306193,
+   "ratio_stdev": 0.004882728407661188,
+   "per_file": [
+    {
+     "file": "train-00000-of-00015.parquet",
+     "documents": 164,
+     "characters": 710955,
+     "old_tokens": 448369,
+     "new_tokens": 417198,
+     "ratio": 0.9304791366040025
+    },
+    {
+     "file": "train-00001-of-00015.parquet",
+     "documents": 164,
+     "characters": 421294,
+     "old_tokens": 271830,
+     "new_tokens": 251766,
+     "ratio": 0.9261891623441121
+    },
+    {
+     "file": "train-00003-of-00015.parquet",
+     "documents": 164,
+     "characters": 261282,
+     "old_tokens": 165490,
+     "new_tokens": 153904,
+     "ratio": 0.9299897274759804
+    },
+    {
+     "file": "train-00004-of-00015.parquet",
+     "documents": 164,
+     "characters": 386286,
+     "old_tokens": 238902,
+     "new_tokens": 221885,
+     "ratio": 0.9287699558814911
+    },
+    {
+     "file": "train-00005-of-00015.parquet",
+     "documents": 164,
+     "characters": 254893,
+     "old_tokens": 160101,
+     "new_tokens": 147802,
+     "ratio": 0.9231797427873655
+    },
+    {
+     "file": "train-00006-of-00015.parquet",
+     "documents": 164,
+     "characters": 221936,
+     "old_tokens": 140543,
+     "new_tokens": 129904,
+     "ratio": 0.9243007478138363
+    },
+    {
+     "file": "train-00008-of-00015.parquet",
+     "documents": 164,
+     "characters": 229459,
+     "old_tokens": 145880,
+     "new_tokens": 134491,
+     "ratio": 0.9219289827255278
+    },
+    {
+     "file": "train-00009-of-00015.parquet",
+     "documents": 164,
+     "characters": 279548,
+     "old_tokens": 171373,
+     "new_tokens": 158950,
+     "ratio": 0.9275090008344372
+    },
+    {
+     "file": "train-00010-of-00015.parquet",
+     "documents": 164,
+     "characters": 264390,
+     "old_tokens": 165365,
+     "new_tokens": 153046,
+     "ratio": 0.9255041877059837
+    },
+    {
+     "file": "train-00011-of-00015.parquet",
+     "documents": 164,
+     "characters": 273895,
+     "old_tokens": 170914,
+     "new_tokens": 159139,
+     "ratio": 0.9311057022830195
+    },
+    {
+     "file": "train-00013-of-00015.parquet",
+     "documents": 164,
+     "characters": 245145,
+     "old_tokens": 150428,
+     "new_tokens": 141454,
+     "ratio": 0.94034355306193
+    },
+    {
+     "file": "train-00014-of-00015.parquet",
+     "documents": 164,
+     "characters": 222329,
+     "old_tokens": 142474,
+     "new_tokens": 131863,
+     "ratio": 0.9255232533655263
+    }
+   ]
   },
   "wikimedia-wikisource-20231201-ja": {
+   "ok": true,
+   "extraction": "parquet row groups spread across every file",
+   "files_found": 1,
+   "files_sampled": 1,
    "documents": 2000,
-   "characters": 8472309,
-   "old_tokens": 5737396,
-   "new_tokens": 5272714,
-   "old_chars_per_token": 1.4766819302694114,
-   "new_chars_per_token": 1.6068212688949182,
-   "ratio": 0.9190082051160492,
-   "reduction_percent": 8.09917948839508
+   "characters": 12789855,
+   "old_tokens": 8801111,
+   "new_tokens": 8263183,
+   "old_chars_per_token": 1.4532091459816834,
+   "new_chars_per_token": 1.547812144545268,
+   "ratio": 0.9388795346405698,
+   "reduction_percent": 6.1120465359430165,
+   "ratio_min": 0.9388795346405698,
+   "ratio_max": 0.9388795346405698,
+   "ratio_stdev": 0.0,
+   "per_file": [
+    {
+     "file": "train-00000-of-00001.parquet",
+     "documents": 2000,
+     "characters": 12789855,
+     "old_tokens": 8801111,
+     "new_tokens": 8263183,
+     "ratio": 0.9388795346405698
+    }
+   ]
   }
  }
 }

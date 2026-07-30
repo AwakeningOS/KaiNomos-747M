@@ -1,5 +1,5 @@
 name: Architecture proposal
-description: Propose a falsifiable small-model architecture experiment
+description: Propose a falsifiable architecture experiment
 title: "[PROPOSAL] "
 labels:
   - architecture
@@ -8,7 +8,7 @@ body:
     id: mechanism
     attributes:
       label: Proposed mechanism
-      description: Describe the smallest precise change to the current Base.
+      description: Describe the smallest precise change to the current model.
     validations:
       required: true
   - type: textarea

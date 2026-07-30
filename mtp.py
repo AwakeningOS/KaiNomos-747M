@@ -5,9 +5,9 @@ The main head answers `h_t -> y_{t+1}`.  The MTP head answers
 after, so the body has to carry information that a pure next-token objective can
 leave implicit.
 
-The extra block is deliberately plain -- one fixed KDA block, no JointRoute, no
-Delta, no MUDD -- so the auxiliary objective shapes the *body*, and any gain
-cannot be attributed to extra routed capacity that only the MTP path enjoys.
+The extra block is deliberately plain -- one fixed KDA block without Delta or
+MUDD depth mixing -- so the auxiliary objective shapes the *body* instead of
+receiving a second copy of its depth mechanisms.
 The final norm and the LM head are shared with the body; the MTP module is used
 during training only and can be dropped at inference.
 """

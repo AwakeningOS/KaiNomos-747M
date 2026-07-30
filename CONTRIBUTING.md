@@ -35,7 +35,7 @@ invalidates a result, retain the record and mark it invalid.
 ## Pull requests
 
 - Keep one causal claim per pull request when practical.
-- Add tests for new mechanisms and identity/disabled modes.
+- Add tests for new mechanisms and their initialization invariants.
 - Run `pytest -q`.
 - Do not commit datasets, secrets, or `.pt`/`.safetensors` checkpoints.
 - Explain how the comparison controls parameter count, tokens, and compute.

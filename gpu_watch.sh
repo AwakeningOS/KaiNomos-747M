@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # Record GPU telemetry beside the training log.
 #
-# The 2026-07-29 run died mid-arm with no kernel panic -- the journal simply
-# stopped, seconds after lact reported it had lost fan control. That is the
-# signature of a hard reset, not a software fault, so the next failure needs
-# evidence from the hardware side rather than from train.jsonl.
+# Keep an independent time series across long runs. If the machine freezes,
+# process logs alone may not identify whether the cause was software, thermal,
+# power delivery, PCIe, or another hardware path.
 #
 # This only observes. It does not change clocks, fan curves or power limits:
 # those are the machine owner's to set.

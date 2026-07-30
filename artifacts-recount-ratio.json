@@ -1,0 +1,122 @@
+{
+ "old_tokenizer": "data/tokenizer/kainomos.model",
+ "new_tokenizer": "/run/media/youthk/HD-LCU3/DoubleDragon-DataMix-v2/tokenizer/final/doubledragon-datamix-v2-49152.model",
+ "sample_documents_per_source": 2000,
+ "seed": 11,
+ "note": "sample-based ratios, not a full recount; rescale old counts by `ratio`",
+ "sources": {
+  "HuggingFaceFW-finepdfs": {
+   "documents": 2000,
+   "characters": 7104227,
+   "old_tokens": 4522482,
+   "new_tokens": 4053718,
+   "old_chars_per_token": 1.5708690493406055,
+   "new_chars_per_token": 1.7525212656627818,
+   "ratio": 0.8963480672781008,
+   "reduction_percent": 10.36519327218992
+  },
+  "HuggingFaceFW-finepdfs-download": {
+   "error": "no readable parquet text column"
+  },
+  "HuggingFaceTB-dclm-edu": {
+   "documents": 2000,
+   "characters": 11598056,
+   "old_tokens": 3247608,
+   "new_tokens": 3131758,
+   "old_chars_per_token": 3.5712610635273716,
+   "new_chars_per_token": 3.7033691619850577,
+   "ratio": 0.9643275912610143,
+   "reduction_percent": 3.5672408738985695
+  },
+  "HuggingFaceTB-finemath": {
+   "documents": 2000,
+   "characters": 9948724,
+   "old_tokens": 3427880,
+   "new_tokens": 3322077,
+   "old_chars_per_token": 2.9022964631200625,
+   "new_chars_per_token": 2.9947301040884966,
+   "ratio": 0.9691345671377061,
+   "reduction_percent": 3.086543286229393
+  },
+  "PleIAs-Japanese-PD": {
+   "documents": 2000,
+   "characters": 56613186,
+   "old_tokens": 49470575,
+   "new_tokens": 48245331,
+   "old_chars_per_token": 1.1443809981994346,
+   "new_chars_per_token": 1.1734438302433867,
+   "ratio": 0.9752328732787117,
+   "reduction_percent": 2.4767126721288335
+  },
+  "kasys-ReCaRe": {
+   "documents": 2000,
+   "characters": 403628,
+   "old_tokens": 254826,
+   "new_tokens": 223469,
+   "old_chars_per_token": 1.5839357051478264,
+   "new_chars_per_token": 1.8061923577766938,
+   "ratio": 0.8769474072504375,
+   "reduction_percent": 12.30525927495625
+  },
+  "llm-jp-continuation": {
+   "documents": 2000,
+   "characters": 3556672,
+   "old_tokens": 1770551,
+   "new_tokens": 1687230,
+   "old_chars_per_token": 2.0087938726419066,
+   "new_chars_per_token": 2.1079947606431846,
+   "ratio": 0.9529406382532896,
+   "reduction_percent": 4.705936174671043
+  },
+  "llm-jp-scaling-data-constrained-llms": {
+   "documents": 2000,
+   "characters": 3072467,
+   "old_tokens": 1532962,
+   "new_tokens": 1438500,
+   "old_chars_per_token": 2.0042682075615703,
+   "new_chars_per_token": 2.1358825165102537,
+   "ratio": 0.9383794249302984,
+   "reduction_percent": 6.162057506970164
+  },
+  "stack-edu-continuation-pilot": {
+   "documents": 2000,
+   "characters": 8396903,
+   "old_tokens": 2914413,
+   "new_tokens": 2900321,
+   "old_chars_per_token": 2.8811644060056003,
+   "new_chars_per_token": 2.8951633284729517,
+   "ratio": 0.9951647209918429,
+   "reduction_percent": 0.4835279008157056
+  },
+  "stack-edu-continuation-r3": {
+   "documents": 2000,
+   "characters": 7017290,
+   "old_tokens": 2933748,
+   "new_tokens": 2940409,
+   "old_chars_per_token": 2.391919824061235,
+   "new_chars_per_token": 2.3865013336580048,
+   "ratio": 1.002270474492015,
+   "reduction_percent": -0.22704744920150066
+  },
+  "wikimedia-wikipedia-20231101-ja": {
+   "documents": 2000,
+   "characters": 16728776,
+   "old_tokens": 10393939,
+   "new_tokens": 9681481,
+   "old_chars_per_token": 1.6094741368022267,
+   "new_chars_per_token": 1.727914974991946,
+   "ratio": 0.9314544755361754,
+   "reduction_percent": 6.854552446382456
+  },
+  "wikimedia-wikisource-20231201-ja": {
+   "documents": 2000,
+   "characters": 8472309,
+   "old_tokens": 5737396,
+   "new_tokens": 5272714,
+   "old_chars_per_token": 1.4766819302694114,
+   "new_chars_per_token": 1.6068212688949182,
+   "ratio": 0.9190082051160492,
+   "reduction_percent": 8.09917948839508
+  }
+ }
+}

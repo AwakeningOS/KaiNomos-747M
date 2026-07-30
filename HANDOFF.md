@@ -311,14 +311,35 @@ embedding を AdamW 側に置くのは意図的（行は「引かれる」だけ
 3. **複数の課題または内部統計に同時に現れる**
 4. 分野別 NLL のどこが動いたかが特定できる
 
+### `observe.py`（実装済み、2026-07-30）
+
+観測ラダーの各段で実行し、`runs/growth_log.jsonl` に1スナップショット1行を追記する。軌跡がファイルとして読める。
+
+```bash
+PYTHONPATH=. $PY observe.py \
+  --snapshot runs/dense_seed11/observations/obs_000050M.pt \
+  --tokenizer /run/media/youthk/HD-LCU3/DoubleDragon-DataMix-v2/tokenizer/final/doubledragon-datamix-v2-49152.model \
+  --domains <domain->bin の JSON> --data-dir data/pool
+```
+
+記録するもの: 分野別の `nll` / `perplexity` / `top1` / **`margin`** / `nll_p10` / `nll_p90`、および固定プロンプト・固定seedからの生成。
+
+**`margin`（正解トークンの logit − 最良の誤りトークンの logit）が要点。** 未訓練モデルでの実測が示すとおり:
+
+```
+NLL 10.48 (≈ln(32768))   top1 0.00%   margin −1.851
+```
+
+**top1 は 0% で床に張り付いているのに margin は動いている。** margin が −1.851 から 0 に近づき、0 を越えた瞬間に top1 が跳ねる。その跳ねを「創発」と誤読しないために、跳ねる前から連続的に動いている量が必要だった。ベンチマーク不要で held-out テキストだけから計算できる。
+
+分野別データは `--domains` に JSON（分野名 → validation .bin）で渡す。省略時は `validation.bin` 単体を `all` として測るので、新プールを待たずに使える。
+
+生成は `respect_documents=False` で呼んでいる。**これは飾りではない** — 境界処理を有効にしたままプロンプト内に `<|eod|>` があると、モデルが自分の文脈から遮断される（tiny 構成で hidden state が 2.82 動いた）。
+
 ### まだ作っていないもの（次の実装対象）
 
-1. **観測スクリプト**。各 snapshot に対して固定条件で記録する:
-   - 全体および**分野別** validation NLL（プールは `ja_web` / `ja_paraphrase` / `ja_instruct` / `ja_wikipedia_reference` / `en_edu` / `code_*` / `math` のソース情報を持っている）
-   - 固定プロンプト集からの生成（サンプリング seed も固定）。これが「成長日記」になる
-   - 1行を追記していく成長ログ（1ファイルで通しで読めるように）
-2. **使い捨て会話LoRA**。主要 snapshot ごとに**同一の小規模会話SFT**を当てて会話する。SFT条件を毎回同じにすれば、会話データの差ではなく Base 能力の成長を比べられる。Base は汚さない
-3. 生成経路の確認。`respect_documents=False` で呼ぶ必要がある（`mla.py` は cache と文書マスクの併用で `NotImplementedError` を投げる。生成時は文書境界がないので False で正しい）
+1. **使い捨て会話LoRA**。主要 snapshot ごとに**同一の小規模会話SFT**を当てて会話する。SFT条件を毎回同じにすれば、会話データの差ではなく Base 能力の成長を比べられる。Base は汚さない
+2. **逐次デコード（キャッシュ配線）。** `model.py` は `K3MiniCache` を import し `K3MiniOutput.cache` フィールドも持つが、`forward` は `use_cache` を受け取らずキャッシュを作りも返しもしない。**逐次デコード経路は壊れているのではなく存在しない。** `observe.py` は毎ステップ全プレフィックスを再forwardする O(n²) で代替しており、64〜200トークンの成長日記なら実用上問題ない。長文生成や対話を実用速度でやるなら配線が必要
 
 ### データ方針
 
@@ -450,7 +471,8 @@ VRAM は step 30 以降まったく増えない（断片化なし）
 
 ### 待たずに着手できるもの（優先順）
 
-1. **観測スクリプト（§6b）。これが最優先の未実装。** ユーザーの目的は最終スコアではなく「育つ過程を観察し、会話して成長を感じ、非線形な立ち上がりがあるか見ること」で、その道具が何もない。必要なもの:
+1. ~~観測スクリプト~~ → **`observe.py` として実装済み**（下記）。次は分野別の分割定義を新プールの `source-provenance.json` から作ること
+2. **旧・観測スクリプト項目（§6b）。** ユーザーの目的は最終スコアではなく「育つ過程を観察し、会話して成長を感じ、非線形な立ち上がりがあるか見ること」で、その道具が何もない。必要なもの:
    - 分野別 validation NLL（プールはソース情報を持っている）
    - 固定プロンプト集からの生成、サンプリング seed も固定 = 成長日記
    - 1ファイルに追記していく成長ログ

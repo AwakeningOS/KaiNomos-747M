@@ -12,11 +12,11 @@ to the Delta Block, so exactly one mechanism writes to each path.
 
 At initialisation the static bias selects the newest source and the dynamic MLP
 outputs zero, so every stream returns `h_l` *exactly*.  Normalisation is not done
-here: the layer owns a single `attn_norm`, the same one the 82M model had, and it
-is applied to these mixes by the caller.  An earlier version normalised each
+here: the layer owns a single shared `attn_norm`, which is applied to these
+mixes by the caller. An earlier version normalised each
 stream inside this module, which meant the "identity" initialisation actually
 returned `RMSNorm(h)` rather than `h` -- a measured max deviation of 0.45 -- and
-silently replaced the migrated 82M pre-attention norm with three fresh ones.
+silently replaced the shared pre-attention norm with three fresh ones.
 
 Stream sets differ by operator, because the operators differ in what they can
 accept: KDA projects Q, K and V independently, while MLA compresses K and V into

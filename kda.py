@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from config import K3MiniPlusPlusPlusConfig as K3MiniConfig
+from config import KaiNomosConfig
 from layers import RMSNorm
 
 try:
@@ -77,7 +77,6 @@ def recurrent_kda(
     log_decay: torch.Tensor,
     beta: torch.Tensor,
     initial_state: torch.Tensor | None = None,
-    full_mask: torch.Tensor | None = None,
     starts: torch.Tensor | None = None,
 ):
     """Float32 decay-first delta-rule reference.
@@ -102,15 +101,14 @@ def recurrent_kda(
         update = (
             beta[:, pos].float().unsqueeze(-1) * key
         ).unsqueeze(-1) * error.unsqueeze(-2)
-        active = 1.0 if full_mask is None else full_mask[:, pos].float().view(b, 1, 1, 1)
-        state = state + update * active
+        state = state + update
         value = (q32[:, pos].unsqueeze(-1) * state).sum(-2)
-        out[:, pos] = value * (active if isinstance(active, float) else active.squeeze(-1))
+        out[:, pos] = value
     return out.to(v.dtype), state
 
 
 class KDAttention(nn.Module):
-    def __init__(self, config: K3MiniConfig):
+    def __init__(self, config: KaiNomosConfig):
         super().__init__()
         cfg = config.kda
         self.cfg = cfg
@@ -194,7 +192,7 @@ class KDAttention(nn.Module):
 
     def forward(
         self, x: torch.Tensor | None = None, cache: KDACache | None = None,
-        use_cache: bool = False, full_mask: torch.Tensor | None = None,
+        use_cache: bool = False,
         q_input=None, k_input=None, v_input=None,
         segments: torch.Tensor | None = None,
         seq_offsets: torch.Tensor | None = None,
@@ -210,19 +208,7 @@ class KDAttention(nn.Module):
         beta_logits = self.beta_proj(x).float()
         initial = None if cache is None else cache.recurrent_state
 
-        # DECAY_ONLY is expressed as beta = 0, not as a mask on the state update.
-        # The two are algebraically identical -- with beta = 0 the delta-rule term
-        # vanishes and the recurrence reduces to S_t = Diag(alpha_t) S_{t-1}, which
-        # is exactly DECAY_ONLY -- but beta is a *kernel input*, so the masked path
-        # keeps running on the FLA Triton kernels.  Masking the update outside the
-        # kernel instead forces the pure-Python sequential reference: measured
-        # 80.6x slower per KDA layer on an RTX 3090 (5.3 ms -> 424.7 ms fwd+bwd at
-        # B=4, T=1024), about +14 h on a 100M-token run.  It also keeps both arms
-        # on the same kernel, so the forced-Fixed inclusion guarantee holds on GPU
-        # and not only on CPU.
         beta = beta_logits.sigmoid()
-        if full_mask is not None:
-            beta = beta * full_mask.to(beta.dtype).unsqueeze(-1)
 
         if self.impl == "reference":
             qn = F.normalize(q.float(), dim=-1, eps=self.cfg.l2_eps).to(q.dtype)
@@ -271,10 +257,6 @@ class KDAttention(nn.Module):
                 use_beta_sigmoid_in_kernel=False, safe_gate=True,
                 lower_bound=self.cfg.gate_lower_bound, scale=1.0,
             )
-
-        # DECAY_ONLY emits no output; the state still decayed above.
-        if full_mask is not None:
-            out = out * full_mask.to(out.dtype).view(*full_mask.shape, 1, 1)
 
         gate = torch.sigmoid(self.output_gate(x)).view_as(out)
         out = self.output_norm(out) * gate

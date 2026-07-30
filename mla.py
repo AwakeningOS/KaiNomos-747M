@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from config import K3MiniPlusPlusPlusConfig as K3MiniConfig
+from config import KaiNomosConfig
 from layers import RMSNorm
 
 
@@ -24,7 +24,7 @@ class MLACache:
 
 
 class GatedMLA(nn.Module):
-    def __init__(self, config: K3MiniConfig):
+    def __init__(self, config: KaiNomosConfig):
         super().__init__()
         cfg = config.mla
         self.cfg = cfg
@@ -95,7 +95,7 @@ class GatedMLA(nn.Module):
 
     def forward(
         self, x: torch.Tensor | None = None, cache: MLACache | None = None,
-        use_cache: bool = False, read_mask: torch.Tensor | None = None,
+        use_cache: bool = False,
         q_input=None, k_input=None, v_input=None,
         segments: torch.Tensor | None = None,
     ):
@@ -148,8 +148,6 @@ class GatedMLA(nn.Module):
         gate = torch.sigmoid(self.output_gate(x).float())
         out = (out.float() * gate).to(x.dtype)
         y = self.output_proj(out)
-        if read_mask is not None:
-            y = y * read_mask.to(y.dtype).unsqueeze(-1)
         return y, MLACache(latent, shared) if use_cache else None
 
 

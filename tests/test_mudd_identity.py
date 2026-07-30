@@ -6,7 +6,7 @@ later gain could not be attributed to the mixing that training learned.
 
 import torch
 
-from config import K3MiniPlusPlusPlusConfig as Config
+from config import KaiNomosConfig as Config
 from mudd_qkv import MuDDQKV
 
 
@@ -84,7 +84,7 @@ def test_model_with_identity_mudd_matches_direct_qkv_input():
     not have caught the norm that made MUDD a non-identity.  Now it runs the same
     weights with and without MUDD and demands equality.
     """
-    from model import K3MiniPlusPlusPlusForCausalLM as Model
+    from model import KaiNomosForCausalLM as Model
 
     torch.manual_seed(7)
     cfg = Config.tiny()

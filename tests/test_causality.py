@@ -2,8 +2,8 @@
 
 import torch
 
-from config import K3MiniPlusPlusPlusConfig as Config
-from model import K3MiniPlusPlusPlusForCausalLM as Model
+from config import KaiNomosConfig as Config
+from model import KaiNomosForCausalLM as Model
 
 
 def test_no_future_token_leakage():

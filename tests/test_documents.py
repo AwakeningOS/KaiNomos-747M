@@ -14,8 +14,8 @@ normally holds two or three unrelated documents. Four things have to hold:
 import pytest
 import torch
 
-from config import K3MiniPlusPlusPlusConfig as Config
-from model import K3MiniPlusPlusPlusForCausalLM as Model
+from config import KaiNomosConfig as Config
+from model import KaiNomosForCausalLM as Model
 from segments import (
     cu_seqlens,
     document_mask,
@@ -28,19 +28,9 @@ EOD = 4
 
 
 def dense_tiny():
-    """The tiny config with routing off, i.e. shaped like what is deployed.
-
-    `Config.tiny()` leaves routing on so the router tests have something to run
-    against, and the router is itself a cross-document channel: `_chunk_select`
-    reads one hidden state per 64-token chunk and applies that decision to the
-    whole chunk, so a chunk spanning a boundary lets the earlier document choose
-    the later one's execution mode.  Nothing deployed hits that -- the dense model
-    builds no controller -- but a routed model would need chunk boundaries clipped
-    to document boundaries before it could claim document independence.
-    """
+    """A CPU-sized configuration with the production document semantics."""
     cfg = Config.tiny()
     cfg.kda_impl = "reference"
-    cfg.joint_route.enabled = False
     return cfg
 
 
@@ -121,7 +111,6 @@ def test_earlier_documents_cannot_change_later_ones():
     cfg = dense_tiny()
     torch.manual_seed(11)
     model = Model(cfg).double().eval()
-    assert model.model.controller is None
 
     lengths = [6, 7]
     ids = packed_ids(cfg, lengths, seed=1)

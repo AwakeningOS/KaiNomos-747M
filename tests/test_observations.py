@@ -7,8 +7,8 @@ only way to tell a genuine change of slope from a metric crossing a threshold.
 
 import torch
 
-from config import K3MiniPlusPlusPlusConfig as Config
-from model import K3MiniPlusPlusPlusForCausalLM as Model
+from config import KaiNomosConfig as Config
+from model import KaiNomosForCausalLM as Model
 from train import TrainConfig, save_observation
 
 
@@ -54,7 +54,6 @@ def test_a_large_step_can_cross_several_rungs_at_once():
 
 def test_snapshot_holds_weights_only_and_reloads():
     cfg = Config.tiny()
-    cfg.joint_route.enabled = False
     torch.manual_seed(3)
     model = Model(cfg)
 

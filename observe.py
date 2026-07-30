@@ -38,8 +38,10 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from config import K3MiniPlusPlusPlusConfig as Config
-from model import K3MiniPlusPlusPlusForCausalLM as Model
+from config import KaiNomosConfig as Config
+from model import KaiNomosForCausalLM as Model
+from segments import mask_targets_at_boundaries
+from train import manifest_split_paths
 
 DEFAULT_PROMPTS = [
     "日本の首都は",
@@ -64,43 +66,58 @@ def load(path: Path, device: str):
 
 
 @torch.no_grad()
-def measure(model, cfg, path: Path, max_tokens: int, batch: int, device: str) -> dict:
-    """NLL, top-1 accuracy and margin over one held-out token file."""
-    tokens = np.memmap(path, dtype=np.uint16, mode="r")
+def measure(model, cfg, paths: Path | list[Path], max_tokens: int,
+            batch: int, device: str) -> dict:
+    """NLL, top-1 accuracy and margin over held-out token shards."""
+    if isinstance(paths, Path):
+        paths = [paths]
     seq = cfg.context_length_train
-    windows = min(max_tokens // seq, (tokens.size - 1) // seq)
-    if windows < 1:
-        return {}
-
     total_nll = 0.0
     counted = 0
     correct = 0
     margin_sum = 0.0
     per_token = []
-    for start in range(0, windows, batch):
-        rows = np.stack([
-            np.asarray(tokens[i * seq:(i + 1) * seq + 1], dtype=np.int64)
-            for i in range(start, min(start + batch, windows))
-        ])
-        ids = torch.from_numpy(rows).to(device)
-        inputs, targets = ids[:, :-1], ids[:, 1:]
-        with torch.autocast(device, dtype=torch.bfloat16, enabled=device != "cpu"):
-            out = model(inputs)
-        logits = out.logits.float()
-
-        nll = F.cross_entropy(
-            logits.reshape(-1, logits.shape[-1]), targets.reshape(-1),
-            reduction="none",
+    for path in paths:
+        tokens = np.memmap(path, dtype=np.uint16, mode="r")
+        windows = min(
+            max((max_tokens - counted) // seq, 0),
+            (tokens.size - 1) // seq,
         )
-        total_nll += float(nll.sum())
-        counted += int(targets.numel())
-        per_token.append(nll.float().cpu().numpy())
+        for start in range(0, windows, batch):
+            rows = np.stack([
+                np.asarray(tokens[i * seq:(i + 1) * seq + 1], dtype=np.int64)
+                for i in range(start, min(start + batch, windows))
+            ])
+            ids = torch.from_numpy(rows).to(device)
+            inputs, targets = ids[:, :-1], ids[:, 1:]
+            with torch.autocast(device, dtype=torch.bfloat16, enabled=device != "cpu"):
+                out = model(inputs)
+            logits = out.logits.float()
+            targets = mask_targets_at_boundaries(
+                targets, inputs, cfg.eod_token_id
+            )
+            valid = targets != -100
+            nll = F.cross_entropy(
+                logits.reshape(-1, logits.shape[-1]), targets.reshape(-1),
+                reduction="none", ignore_index=-100,
+            ).reshape_as(targets)
+            total_nll += float(nll.sum())
+            counted += int(valid.sum())
+            per_token.append(nll[valid].float().cpu().numpy())
 
-        correct += int((logits.argmax(-1) == targets).sum())
-        # margin: correct logit minus the best logit that is not the correct one
-        gold = logits.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
-        masked = logits.scatter(-1, targets.unsqueeze(-1), float("-inf"))
-        margin_sum += float((gold - masked.max(-1).values).sum())
+            correct += int(((logits.argmax(-1) == targets) & valid).sum())
+            # margin: correct logit minus the best non-correct logit.
+            safe_targets = targets.masked_fill(~valid, 0)
+            gold = logits.gather(-1, safe_targets.unsqueeze(-1)).squeeze(-1)
+            masked = logits.scatter(
+                -1, safe_targets.unsqueeze(-1), float("-inf")
+            )
+            margin_sum += float(
+                ((gold - masked.max(-1).values) * valid).sum()
+            )
+
+    if counted < 1:
+        return {}
 
     stacked = np.concatenate([p.ravel() for p in per_token])
     return {
@@ -140,8 +157,8 @@ def main() -> int:
     ap.add_argument("--tokenizer", required=True)
     ap.add_argument(
         "--domains", default=None,
-        help='JSON mapping domain -> validation .bin.  Without it the single '
-             'validation.bin under --data-dir is measured as one domain "all"',
+        help="JSON mapping domain -> validation .bin. Without it, validation "
+             "shards are read from --data-dir/manifest.json as domain 'all'",
     )
     ap.add_argument("--data-dir", default="data/pool")
     ap.add_argument("--max-tokens", type=int, default=500_000)
@@ -167,15 +184,23 @@ def main() -> int:
     if args.domains:
         domains = {k: Path(v) for k, v in json.loads(Path(args.domains).read_text()).items()}
     else:
-        domains = {"all": Path(args.data_dir) / "validation.bin"}
+        data_dir = Path(args.data_dir)
+        manifest = json.loads((data_dir / "manifest.json").read_text())
+        domains = {
+            "all": manifest_split_paths(manifest, data_dir, "validation")
+        }
 
     started = time.time()
     scores = {}
-    for name, path in domains.items():
-        if not path.exists():
-            print(f"  [skip] {name}: {path} missing")
+    for name, paths in domains.items():
+        check_paths = [paths] if isinstance(paths, Path) else paths
+        missing = [path for path in check_paths if not path.exists()]
+        if missing:
+            print(f"  [skip] {name}: {missing[0]} missing")
             continue
-        scores[name] = measure(model, cfg, path, args.max_tokens, args.batch, args.device)
+        scores[name] = measure(
+            model, cfg, check_paths, args.max_tokens, args.batch, args.device
+        )
         row = scores[name]
         print(f"  {name:26s} nll {row['nll']:.4f}  ppl {row['perplexity']:8.2f}  "
               f"top1 {row['top1']*100:5.2f}%  margin {row['margin']:+7.3f}")

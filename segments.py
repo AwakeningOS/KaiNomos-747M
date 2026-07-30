@@ -1,6 +1,6 @@
 """Document boundaries inside a packed training sequence.
 
-The pool is a flat token stream: `build_pool.py` concatenates documents and
+The pool is a flat token stream: the DataMix-v2 packer concatenates documents and
 terminates each one with `<|eod|>` (id 4), and the loader cuts it every 1024
 tokens.  So a training sequence normally holds two or three unrelated documents
 -- the median document is 455 tokens -- and without the masking here every

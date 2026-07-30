@@ -1,640 +1,77 @@
-# 引き継ぎメモ — KaiNomos
+# KaiNomos-747M handoff
 
-最終更新: 2026-07-30（監査対応と再設計の直後、訓練は未開始）
-書いた目的: **別のエージェントが、この会話の文脈なしで再開できるようにするため。**
+Current production target: **747,368,168 training parameters** on one RTX 3090
+24 GB GPU. The inference backbone is 702,134,416 parameters and the training-only
+MTP head is 45,233,752 parameters.
 
-> ⚠️ このメモは 2026-07-29 版を**全面的に書き換えたもの**である。旧版は「110M・2アームA/B・ルーティング比較」を前提にしていたが、その前提は監査と実測でほぼ全部覆った。旧版の記述を根拠に判断してはいけない。
+## Fixed architecture
 
----
+- 16 decoder layers, hidden size 1,536
+- `KKKM` × 4: 12 KDA layers and 4 NoPE Gated MLA layers
+- 24 attention heads × 64 dimensions
+- dense SiTU-GLU FFN width 6,144 in every layer
+- MUDD-QKV depth mixtures
+- block-granularity Delta Attention Residual retrieval
+- tied 49,152-piece embedding and LM head
+- MTP-1 auxiliary loss, weight 0.30
+- training context 1,024
 
-## 0. 現在の状態を一行で
+The authoritative machine-readable specification is
+`kainomos-747m-architecture.json`.
 
-**外部監査を受けて12項目を修正し、そのうえでモデルを 110M/ルーティング有り から 722.5M/密/Muon へ作り直した。訓練は1トークンも走っていない。** 次にやることは §7。
+## Data contract
 
-### 何が変わったか（旧版との差分）
+Training consumes the schema-v2 `DoubleDragon-DataMix-v2` packed pool:
 
-| | 旧（7-29） | 新（7-30） |
-|---|---|---|
-| 目的 | 等計算量での Base 対 Adaptive の A/B | **最高性能のモデルを1本作る**（比較対象は他者のモデル） |
-| d_model / 層 | 512 / 16 | **1536 / 16**（24ヘッド × 64） |
-| FFN | ネスト梯子 1024〜2816、既定1792 | **一様 6144** |
-| ルーティング | 4軸で有効 | **無効**（コードは残置、`joint_route.enabled=False`） |
-| パラメータ | 111,042,670 | **722,500,872**（推論時 677,267,120） |
-| 82M からの移植 | 前提 | **廃止**（理由は §3） |
-| micro-batch | 6 | **2** |
-| 文書境界 | 未処理 | **処理済み**（MLA遮断・KDA状態リセット・conv遮断・loss除外） |
-| MLA QK-norm | なし | **あり**（64次元統一） |
-| オプティマイザ | AdamW 一括 | **Muon（Moonshot版）を採用**。AdamWは group 分離済みで残置 |
+- `manifest.json`
+- the ordered `splits.train.shards` list
+- `tokenizer.vocab_size = 49152`
+- `eod_token_id = 4`
+- uint16 token shards
 
-**PSU: 2026-07-30 に 1000W が到着予定で、交換すればクラッシュ問題は解消見込み**（ユーザー申告）。交換が済むまで長時間ランを始めないこと。
+`train.py` follows the manifest's declared shard order, validates every path and
+token count, and checkpoints a global stream offset. Resume therefore remains
+exact even when a sequence crosses a shard boundary. The pool is read once by
+default; repeating data requires an explicit larger `--max-epochs` value.
 
-### GPU 実測（RTX 3090, mb=2, seq 1024, Muon + NTP+MTP+境界処理すべて込み）
+Validation and test evaluation also read their shard lists from the same
+manifest.
 
-```
-722,500,872 params   (推論時 677,267,120)
-1,797 tok/s
-20.24 GB reserved    ← mb=2 が上限。AdamW はここで 22.77GB になり不採用基準を超える
-16B  103.1 日        20B  128.8 日   (連続稼働換算)
-D/N @16B = 22.1
-```
+## Training and recovery
 
-### サイズ探索の全結果（2026-07-30、Muon、完成版経路、実データ）
+The production optimizer is Muon for eligible matrices with AdamW for the
+remaining parameters. Checkpoints are written every 50 optimizer steps, with
+the newest two rotating resume checkpoints retained. Milestone checkpoints and
+the weights-only observation ladder are kept separately.
 
-| 構成 | params | mb | tok/s | reserved | 判定 | 16B所要 | D/N@16B |
-|---|---|---|---|---|---|---|---|
-| h896 ffn3584 | 258,611,462 | 4 | 5,767 | 19.05 GB | 安全 | 32.1日 | 61.9 |
-| h1024 ffn4096 | 332,885,024 | 3 | 4,388 | 17.02 GB | 安全 | 42.2日 | 48.1 |
-| h1024 ffn4096 | 332,885,024 | 4 | 4,793 | 21.63 GB | 灰色 | 38.6日 | 48.1 |
-| h1152 ffn4608 | 416,012,602 | 3 | 3,654 | 19.45 GB | 安全 | 50.7日 | 38.5 |
-| h1280 ffn5120 | 508,899,412 | 2 | 2,478 | 16.29 GB | 安全 | 74.7日 | 31.4 |
-| h1280 ffn5120 | 508,899,412 | 3 | 3,085 | 21.79 GB | 灰色※ | 60.0日 | 31.4 |
-| h1408 ffn5632 | 610,961,902 | 2 | 2,096 | 18.22 GB | 安全 | 88.3日 | 26.2 |
-| **h1536 ffn6144** | **722,500,872** | **2** | **1,797** | **20.24 GB** | **採用** | 103.1日 | 22.1 |
-| h1664 ffn6656 | 842,680,866 | 2 | 1,338 | 22.42 GB | **不採用** | 138.4日 | 19.0 |
-
-※ h1280 mb=3 は Muon 限定。AdamW では OOM する
-
-**h1536 が二重の意味で天井。** h1664 は 22.42GB で不採用基準に触れ、**かつ** 16Bプールに対し D/N 19.0 で計算最適比を割る。VRAM とデータの上限が同じ場所で一致している。
-
-AdamW 対比（同一構成）:
-
-| 構成 | Muon | AdamW | Muon速度比 | AdamW VRAM |
-|---|---|---|---|---|
-| h896 mb4 | 5,767 | 7,413 | 78% | 19.91 GB |
-| h1408 mb2 | 2,096 | 3,847 | 54% | 20.33 GB |
-| h1536 mb2 | 1,797 | 3,453 | 52% | **22.77 GB（不採用域）** |
-
-Newton-Schulz のコストは幅に対して悪くスケールし、減速は h896 の22%から h1536 で48%まで悪化する。
-
-### train.py は end-to-end で動作確認済み
-
-新構成で `train.py` を実際に CLI から回して確認した（4ステップ、その後削除）。**この過程で3つのバグを見つけて直した** — §4b。確認できた項目:
-
-```
-初期化 → parameter group 分離 → LR schedule → forward/backward/step
-→ ログ出力 → milestone 保存 → 最終 checkpoint → run_summary
-→ resume → --additional-tokens で継続
-```
-
-| 確認項目 | 結果 |
-|---|---|
-| step の連続性 | 1,2,3,4 と連続。**重複 step ゼロ**（旧ランは resume リプレイで14件作っていた） |
-| LR のセグメント跨ぎ連続性 | 4.98e-07 → 9.97e-07 → 1.495e-06 → 1.994e-06。トークンに対し厳密に線形で cosine のやり直しなし。2回目は `--schedule-tokens` 未指定で **checkpoint から継承** |
-| `joint_budget_valid` | 全step True |
-| 同一 `--target-tokens` の再実行 | 明示エラーで停止（旧版の誤った手順を踏めない） |
-| 初期 loss | ntp 10.55 ≈ ln(32768)=10.40。新規モデルとして妥当 |
-| checkpoint サイズ | 3.1GB/本。milestone 2本 + latest 2本で **約12GB を消費する**。ディスクは242GB空き |
-
----
-
-## 1. なぜ 722.5M / 密 / Muon になったのか（判断の根拠）
-
-順を追わないと「なぜ設計を捨てたのか」が分からなくなるので記録する。すべて実測に基づく。
-
-### (a) ルーティングは実計算を省いていなかった
-
-監査の最重要指摘。MLA は BYPASS でも全 attention と出力射影を実行してから出力にゼロを掛け、FFN は幅が混在すると最大幅を計算してからマスクし、Delta は全ソースを読んでからマスクしていた。`cost_model.py` が数えていたのは「理想的に実行できた場合のMAC数」で、GPU が実際に実行した演算ではない。
-
-そこで幅別 grouped matmul を実装した（`layers.py:_grouped`、数値は mask 経路と 4e-16 一致、勾配も `tier_gain` 経由でルータへ到達）。**しかし実測で密なモデルに負けた。**
-
-| 方式 | 平均幅 | FFN fwd+bwd (6,144トークン) |
-|---|---|---|
-| 密 slice 1792 | 1792 | 3.71 ms |
-| 密 slice 2816 | 2816 | 6.07 ms |
-| grouped 2 tier | 1920 | 5.11 ms |
-| grouped 6 tier | 1941 | **6.50 ms** |
-
-FLOP を31%削っても遅い。6,144トークンを6分割すると1グループ1,024行で、`[1024,512]×[512,W]` の GEMM は3090には小さすぎ、gather/scatter とカーネル起動が削減分を食う。**この規模では原理的に勝てない。**
-
-### (b) 82M でルーティングは既に負けていた
-
-旧版 §5 に記録がある: 82M Base 4.0321/4.0349 対 Joint++ 4.1212/4.1226 で**ルーティング側が NLL +0.089 で不採用**。移植元も勝った Base 側から取られていた。
-
-### (c) Base 幅では2割超のパラメータが死んでいた
-
-旧 Base（FFN 1792）は 25,165,824 パラメータ（モデルの23%）に**一度も勾配を流していない**。訓練ログの `all/1792:2176` 以上が全step 0.0。
-
-(a)(b)(c) から「ルーティングをやめて幅を固定し、その代わり容量を増やす」に転換した。
-その後ユーザーが「遅くてもよい、最終到達点と会話品質が最優先」と方針を示したため、
-VRAM とデータの両方の天井である h1536 まで上げた。
-
-### (d) 形は太く浅い方が速い
-
-| 構成 | params | tok/s |
-|---|---|---|
-| h512 L24 | 143.2M | 8,449 |
-| **h640 L16** | **155.8M** | **10,075** |
-
-パラメータが9%多いのに速い。512/16層は形として損をしていた。
-
-### (e) VRAM に余裕があった
-
-旧 111M は 17.9GB しか使っておらず、24GB に対して余っていた。最終的に h1536/L16/FFN6144 が 20.24GB で収まる。
-
----
-
-## 2. Chinchilla について（誤解しないこと）
-
-私は一度「D/N=20 を超えるからこれ以上大きくできない」と書いたが、**これは誤り**。20 token/param は総訓練計算量を固定したときの配分則で、計算時間を増やせる場合の上限ではない。
-
-現状 258.6M × プール2周(3.94B) で **D/N ≈ 15.2**。データ制約下では4周程度までの再利用が同量の新規データに近い効果を持つと報告されている（arXiv 2305.16264）。
-
-また、以前この文脈で出した「Chinchilla予測損失 3.335」等は**標準Transformer群の近似式を代入した参考値**で、小数3桁の精度はない。表に載せたのが誤解を招いた。判断根拠として使わないこと。
-
----
-
-## 3. 82M 移植は廃止した（が、コードは正しく直してある）
-
-**82M チェックポイントはほぼ無価値だった。**
-
-```
-tokens_done  100,007,936      ← プールの5%
-tokenizer    16,384 English BPE  ← 日本語を1文字2.56トークンに分解していた
-```
-
-100Mトークン（D/N=1.2 で極端な訓練不足）かつ日本語をほぼ生バイトに分解するトークナイザで訓練されている。d_model を 896 にした時点で移植は不可能になるが、**そもそも守る価値がなかった。**
-
-ただし監査項目としての移植バグは全部直してある（`migrate_vocab.py`）。h512 構成に戻す場合はそのまま使える。
-
-- shape完全一致のみコピーだったため **mismatch 54本 → 0本**、**48,562,176 param を回収**
-- ネスト prefix コピーを追加（監査は「82M側は幅1792」としていたが**実際は2432**。指示どおり `[:1792]` にすると訓練済み640行を捨てる）
-- 82Mの最終MLA層（index 12）を110Mの最終MLA（index 15）へ役割対応。index揃えだと訓練済み層が丸ごと捨てられていた
-- 新規層は4層（12,13,14,15）。監査は「3層」と書いていたが、82M層12はMLA・110M層12はKDAで役割が違うため。`fresh_layers` 自体が過少報告だった
-- `--booster-scale` が定義だけで未使用だったのを実際に配線（新規層と新規FFN帯の出力射影を0.1倍）
-- 生成物: `runs/kainomos_110m_init_v2.pt`（**h512構成用なので現構成では使えない**）
-
----
-
-## 4. 監査12項目の処理結果
-
-| # | 項目 | 状態 |
-|---|---|---|
-| 1 | JointRoute が実計算を省かない | grouped dispatch 実装済み。実測で不採用 → ルーティング自体を廃止 |
-| 2 | 評価時に訓練済み price を使わない | 修正（`eval.py`, `route_eval.py` 3箇所） |
-| 3 | 82M FFN が移植されない | 修正（§3） |
-| 4 | 新規層が弱い残差でない | 修正 |
-| 5 | MUDD identity が identity でない | 修正。差 0.45 → **厳密に0** |
-| 6 | MLA で V stream が無視される | 修正。KDA=Q/K/V、MLA=Q/KV。誤用は例外 |
-| 7 | AdamW が特殊 param まで減衰 | 修正。no-decay group 分離 |
-| 8 | KDA decay 初期値が強すぎる | 修正。保持率 0.217 → 0.778（raw=0 で厳密に0.9） |
-| 9 | price solver が最後の batch だけ | 修正。`merge_decisions` でサンプル軸連結 |
-| 10 | LR schedule がない | 修正。warmup+cosine、**トークン基準**なのでセグメント間で連続 |
-| 11 | 夜間セグメント継続のバグ | 修正。`--additional-tokens` / `--max-epochs` 追加 |
-| 12 | テストと依存環境 | requirements補完 + `ENVIRONMENT_LOCK.md` |
-
-### 4b. スモークランで見つけて直したバグ3件
-
-密構成に切り替えた副作用で、監査項目とは別に3件出た。いずれも `train.py` を実際に回すまで見えなかった。
-
-1. **`joint_budget_valid` が全step false になっていた（実害あり）。**
-   密モデルには予算の概念がないのに `OrganCosts` が `budget_target=1.0037` を報告し続け、実行コスト 1.0 と食い違って INVALID 判定。`train.jsonl` の全行と `run_summary.json` に false が書かれる。**このプロジェクトはまさにこのフラグで結果の採否を判断する**ので、後任が「このランは無効」と誤読する。→ 密モデルでは `cost_target` / `full_policy_cost` を None で返すよう修正（`model.py`）
-2. **price solver が密モデルでも走っていた。**
-   決定リストが空なので `_cost_at_price` は `fixed_share`(0.373) しか返さず目標に届かず、下限 **-1024 にクランプ**されて checkpoint に書かれていた。priceを読むコントローラが存在しないので数学的には無害だが、毎step 40回の二分探索が無駄。→ 決定が空なら solver を回さない
-3. **step 1 の LR が 7.6e-12 で実質ゼロ。**
-   加算前の `tokens_done` を渡していたため、warmup 開始点が 1/warmup になっていた。→ そのステップが消費するトークン後の値を使う
-
-### 監査自体の誤り3点（重要）
-
-1. **「82M側FFNは幅1792」→ 実際は2432。** 指示どおり実装すると訓練済み重みを捨てる
-2. **「新規3層」→ 実際は4層**
-3. **「tests なし / pytest 0件」** は ZIP の梱包漏れ。リポジトリには元から28本あり全部通っていた
-
-### 監査が見落としていた点（こちらで発見）
-
-- KDA の `decay_rank` が 82M 64 → 110M 32 に**狭められ**、9つのKDA層が訓練済み decay 射影を失っていた（12.4M param）
-- `delta_keys` が `num_blocks + 1 = 5` 本の射影を作るが bank のソースは最大4本で、**5本目に永久に勾配が来ていなかった**（→ `num_blocks` に修正）
-- KDA の depthwise conv は恒等フィルタ初期化なのに weight decay 対象だった（→ no-decay へ）
-
----
-
-## 5. 文書境界処理（今回の最大の実装）
-
-`segments.py` に集約。境界は `train.idx` ではなく**トークン列の `<|eod|>`(id 4) から導出**する（idxとストリームの位置ずれが原理的に起きない、validation/testにも自動的に効く）。検証済み: プール先頭4000万トークンで id 4 は29,329回出現し、**全部が文書末、それ以外の出現はゼロ**。
-
-プールは 2,236,344 文書、中央長455トークンなので、1024トークンのシーケンスに平均2〜3文書が入る。
-
-処理内容:
-
-| 対象 | 方法 |
-|---|---|
-| MLA | segment ID から block-diagonal ∧ causal マスク |
-| KDA 再帰状態 | FLA の `cu_seqlens`（varlen モード、`[B,T]→[1,B*T]` 平坦化が必須） |
-| KDA short conv | lag ごとにマスクした畳み込み（`masked_lagged_sum`）。kernel 4 なので3トークン漏れていた |
-| loss | `<|eod|>` を**入力とする**位置1箇所のみ除外。新文書の先頭位置は除外しない |
-| MTP | 入力2つのどちらかが `<|eod|>` の三つ組を除外 |
-
-### 効果の実測（これが一番大事な数字）
-
-GPU の varlen 経路で、文書0を書き換えて境界以降が動くかを測った:
-
-| | 文書0の変化量 | 境界以降の変化量 |
-|---|---|---|
-| **境界処理あり** | 1.959 | **0.000e+00** |
-| 境界処理なし（従来） | 1.959 | **1.134** |
-
-**従来の汚染は1.134** — 出力スケール（約1.5〜2）と同じ桁で、微小な効果ではなかった。処理後は厳密にゼロ。
-
-コスト: **−10.5% スループット、+1.2GB VRAM**。
-
-### 注意点
-
-- **ルーター自体が未処理の漏れ経路。** `_chunk_select` はチャンク先頭1トークンから決定を取り64トークンに適用するので、境界をまたぐチャンクでは前文書が後文書の実行モードを決める（実測 6e-08）。密モデルではコントローラを建てないので影響なし。**ルーティングを再有効化するならチャンク境界を文書境界でクリップすること。**
-- **best-fit packing は未実装。** 文書はシーケンス境界でまだ切り詰められる。減らすには `train.bin` の再構築が必要（arXiv 2404.10830）。
-- fp32 で varlen と文書ごと個別実行を比べると相対 2.7e-4 残るが、これは Triton 内の TF32 とチャンク分割差による精度由来。境界独立性は上表のとおり厳密なので問題ない。
-
----
-
-## 6. MLA QK-norm と Muon
-
-### QK-norm — 実装済み
-
-`mla.py` に `q_norm` / `k_norm`（`q_head_dim`=64 次元、affine あり bias なし、初期値1）。
-
-**64次元統一が正しい**理由: `key = cat([content(48), shared(16)])` として SDPA が単一内積を取っているので、content/shared を分ける実装上の境界が存在しない。QK-Normed MLA（arXiv 2606.16310）が content と RoPE を別々に正規化しているのはキャッシュ形式が違うためで、論文自身「連結ヘッド全体を一度に正規化しても代数的に成立する」と述べている。**本モデルは NoPE なので16次元は RoPE 経路ではない。**
-
-論文の吸収形式（key側静的重みをquery射影へ畳み込み、token/KVグループごとに inverse-RMS スカラーを1個保存）は**不要**。`expand_kv` が毎回 full key を実体化しているので、守るべき latent-only 内積経路が存在しない。これは論文が等価性を証明している当の参照経路そのもの。**将来 absorbed decode 経路を書くなら論文の方式への変換が必須**（`mla.py` にコメントで明記済み）。
-
-QK-norm を入れた直後に LR を上げてはいけない（論文の高LRストレス試験は安定性の実証で、推奨設定ではない）。
-
-### Muon — **採用**（比較なしで決定、理由は下記）
-
-`muon.py`。Moonshot版（arXiv 2502.16982）準拠で、素の Muon ではない:
-- decoupled weight decay
-- update RMS を AdamW に整合させる `0.2 * sqrt(max(A,B))` スケーリング（直交行列の要素RMSは `1/sqrt(max(A,B))` で形状依存なので、これがないと単一LRが意味を持たない）
-- Newton-Schulz 5次、bf16
-
-分類:
-- **Muon**: 2次元の線形写像（KDA/MLA射影、FFN、MUDD の係数MLP、Delta key射影、MTP の fuse）
-- **AdamW**: embedding と tied LM head、RMSNorm gain、全bias、`A_log`、`dt_bias`、MUDD `static_bias`、Delta gate、depthwise conv フィルタ、0/1次元すべて
-
-embedding を AdamW 側に置くのは意図的（行は「引かれる」だけで写像として作用せず、バッチに出たトークンの行しか勾配を持たないため、直交化すると出現しなかったトークンへ更新が混ざる）。
-
-**軽い健全性確認は通っている**: 特異値 0.68〜1.15（quintic反復は速度重視なので厳密1ではない）、`RMS×√max ≈ 0.97`、パラメータ100%分類（99,396/99,396）、1step で Muon側 1.4e-2 / AdamW側 3.0e-4 動く、全て有限。
-
-**比較せずに採用した理由**（2026-07-30、ユーザー判断）:
-
-1. **選んだサイズでは Muon が唯一の選択肢。** h1536 で AdamW は 22.77GB を要し不採用基準を超える。Muon が約2.5GB 節約するので 20.24GB で収まる。比較が意味を持つのは h1408 まで下げる用意がある場合だけだった
-2. 採用したのは Moonshot 版（decoupled weight decay ＋ update RMS 整合）で、これはまさに「初期に先行して長期で負ける」病理への対策そのもの
-3. 健全性確認は通っている（安定、有限、全パラメータ分類、特異値 0.675〜1.144、`RMS×√max ≈ 0.97`）
-4. 比較には各アーム300Mトークンで約26時間必要で、ユーザーが割に合わないと判断した
-
-**残っているリスク**: 上記1〜3は「壊れていない」ことしか保証しない。Muon が16Bで AdamW に勝つ証拠はこの環境には存在しない。`compare_optimizers.sh` と `compare_optimizers.py` は回せる状態で置いてあるので、疑いが生じたら実行できる（h896、各300M、約26時間、終点ではなく後半の傾きを読む）。
-
-**まだやっていないこと**:
-1. `train.py` への配線（`--optimizer adamw|muon` フラグ、checkpoint への state 保存）
-2. **同一初期値・同一データ順での短い AdamW 比較**。既知研究の再確認ではなく、KaiNomos固有の KDA/MLA 行列を Muon に入れても成立するかだけを見る。発散しないか、速度、初期 validation NLL の傾き
-3. Kimi K2 では Muon で attention logit が増大し QK-Clip を追加している。**QK-norm は既に入っているので順序は正しい**が、logit の増大は監視すること
-
----
-
-## 6b. 「育てて楽しむ」ための訓練設計
-
-ユーザーの目的は最終スコアだけではなく、**育っていく過程を観察し、会話して成長を感じ、非線形な能力の立ち上がりがあるか見ること**。そのための設計を入れてある。
-
-### 観測ラダー（実装済み）
-
-`TrainConfig.observation_tokens` に対数間隔13点。50M / 100M / 200M / 400M / 800M / 1.5B / 2.5B / 4B / 6B / 8B / 12B / 16B / 20B。
-
-2つの設計判断がある:
-
-- **絶対トークン数で指定**（`milestone_fractions` のような割合ではない）。セグメント運用では毎晩 target が変わるので、割合だと観測点が動いてセグメント間でラダーが揃わない
-- **重みのみ保存**（optimizer state も RNG も持たない）。500M で 5.7GB → **2.0GB/本**。13点で 74GB → 26GB。これは「読むため」の snapshot で、再開には使わない。再開は `step_*.pt` 側
-
-保存先は `runs/<run>/observations/obs_000050M.pt` 形式。`retain_latest` の回転対象外。
-
-### 創発を名乗る条件（重要）
-
-**正解率の突然のジャンプを「創発」と呼んではいけない。** 離散採点は、内部能力が滑らかに改善していても閾値を越えた瞬間だけ急上昇して見える（Schaeffer et al. の批判）。次の4条件を満たしたものだけを変化点として扱う:
-
-1. **連続指標でも傾きが変わる** — 正解率ではなく、正答への log-prob と誤答とのマージン
-2. **隣接する複数の観測点で持続する** — 1点だけの跳ねはノイズ
-3. **複数の課題または内部統計に同時に現れる**
-4. 分野別 NLL のどこが動いたかが特定できる
-
-### `observe.py`（実装済み、2026-07-30）
-
-観測ラダーの各段で実行し、`runs/growth_log.jsonl` に1スナップショット1行を追記する。軌跡がファイルとして読める。
+Typical launch:
 
 ```bash
-PYTHONPATH=. $PY observe.py \
-  --snapshot runs/dense_seed11/observations/obs_000050M.pt \
-  --tokenizer /run/media/youthk/HD-LCU3/DoubleDragon-DataMix-v2/tokenizer/final/doubledragon-datamix-v2-49152.model \
-  --domains <domain->bin の JSON> --data-dir data/pool
+PYTHONPATH=. python train.py \
+  --data-dir /path/to/packed-pool \
+  --run-dir /path/to/run \
+  --device cuda \
+  --allow-gpu \
+  --optimizer muon \
+  --schedule-tokens 17000000000
 ```
 
-記録するもの: 分野別の `nll` / `perplexity` / `top1` / **`margin`** / `nll_p10` / `nll_p90`、および固定プロンプト・固定seedからの生成。
+Re-running the same command resumes from the newest `step_*.pt`. Use
+`--additional-tokens` for a new segment beyond an existing checkpoint.
 
-**`margin`（正解トークンの logit − 最良の誤りトークンの logit）が要点。** 未訓練モデルでの実測が示すとおり:
+## Hardware-failure investigation
 
-```
-NLL 10.48 (≈ln(32768))   top1 0.00%   margin −1.851
-```
+For long runs, retain independent five-second telemetry for GPU core, hotspot
+and VRAM temperature, power, clocks, PCIe replay counters and driver recovery
+state. A manual reset cannot flush ordinary process logs, so checkpoint files
+and telemetry must live on persistent storage and be inspected after reboot.
 
-**top1 は 0% で床に張り付いているのに margin は動いている。** margin が −1.851 から 0 に近づき、0 を越えた瞬間に top1 が跳ねる。その跳ねを「創発」と誤読しないために、跳ねる前から連続的に動いている量が必要だった。ベンチマーク不要で held-out テキストだけから計算できる。
+If continuous load reproduces the freeze, the planned fallback is a 30-minute
+training / 5-minute idle cycle. Do not introduce that duty cycle until a
+continuous run has provided a clean comparison.
 
-分野別データは `--domains` に JSON（分野名 → validation .bin）で渡す。省略時は `validation.bin` 単体を `all` として測るので、新プールを待たずに使える。
+## Release state
 
-生成は `respect_documents=False` で呼んでいる。**これは飾りではない** — 境界処理を有効にしたままプロンプト内に `<|eod|>` があると、モデルが自分の文脈から遮断される（tiny 構成で hidden state が 2.82 動いた）。
-
-### まだ作っていないもの（次の実装対象）
-
-1. **使い捨て会話LoRA**。主要 snapshot ごとに**同一の小規模会話SFT**を当てて会話する。SFT条件を毎回同じにすれば、会話データの差ではなく Base 能力の成長を比べられる。Base は汚さない
-2. **逐次デコード（キャッシュ配線）。** `model.py` は `K3MiniCache` を import し `K3MiniOutput.cache` フィールドも持つが、`forward` は `use_cache` を受け取らずキャッシュを作りも返しもしない。**逐次デコード経路は壊れているのではなく存在しない。** `observe.py` は毎ステップ全プレフィックスを再forwardする O(n²) で代替しており、64〜200トークンの成長日記なら実用上問題ない。長文生成や対話を実用速度でやるなら配線が必要
-
-### データ方針
-
-固定比率フェーズを通し、途中で比率を大きく変えない。**途中で数学や会話データを増やすと、内部の発達なのか投入データの変更なのか区別できなくなる。** 高品質データ中心の mid-training は最後に別枝として行い、Base は保存する。
-
-**データ構築は別エージェントが担当**（2026-07-30 時点）。完成の報告を待つ。現プールは 1.97B で、固定比率フェーズを長く回すには足りない。
-
-## 6c. トークナイザ再訓練（別エージェント担当、2026-07-30 時点で進行中）
-
-現トークナイザは**旧プールの分布**（ja 0.75 / en 0.10 / code 0.10 / math 0.05、旧ソース）で訓練されており、DataMix v2 とは別分布。v2 は finepdfs・Wikipedia全文・Wikisource・公文書・dclm-edu・stack-edu・finemath が主体で、自然会話は0%。Unigram は訓練分布に合わせて語彙を配分するので、分布がずれれば配分を外す。
-
-**実測ベースライン: 日本語主体テキストで 2.11 chars/token**（`data/pool` 中盤400文書、日本語率72.5%）。出来のいい日本語トークナイザは 2.5〜3.0 出るので余地がある。圧縮率は実効データ量をそのまま掛け算するため、2.11→2.6 なら同じ16Bで23%多いテキストを読むことになる（3.7Bトークン相当を無償で得るのと同じ）。データが律速資源である以上、最も価値の高い改善。
-
-### 譲れない制約
-
-1. **`<|eod|>` は token id 4 のまま。** 文書境界は `ids == 4` から導出している（`segments.py`）。id が変わると**壊れずに静かに間違う** — 誤った位置で境界が検出され、attention マスクと KDA 状態リセットが無意味な場所に入り、エラーは出ない。特殊トークン配置を保つこと:
-   ```
-   0 <unk>   1 <|pad|>   2 <|bos|>   3 <|eos|>   4 <|eod|>   5以降 byte fallback
-   ```
-2. **byte_fallback 有効のまま**（日本語被覆）
-3. 圧縮率を同じ測り方で報告する（2.11 chars/token と比較可能な形で）
-
-### 語彙サイズを変える場合はサイズ再調整が必要
-
-| 新語彙 | サイズ再調整 | 影響 |
-|---|---|---|
-| **32,768 のまま** | **不要** | params 722,500,872 / 20.24GB / 1,797 tok/s がそのまま有効 |
-| 49,152 | 必要 | 埋め込み +25.2M → 747,666,696 |
-| 65,536 | 必要 | 埋め込み +50.3M → 772,832,520、VRAM 約21.3GB 見込みで安全圏を出る。幅を h1408 へ下げるか mb を下げる判断が入る |
-
-VRAM の増分は2箇所から来る: 埋め込み params ×16バイト（重み+勾配+AdamW 2モーメント。埋め込みは Muon 側ではない）と、`cross_entropy` が `[mb, T-1, vocab]` を float32 にキャストする分。
-
-再測定は安い（`scratchpad/bench_big.py` とラダーが残っており、2〜3構成で15分程度）。
-
-`train.py` は vocab_size を**プールの manifest から読む**ので、モデル既定値を直す必要はない。manifest とモデルの vocab_size 不一致は起動時に検出される。
-
-## 6d. Delta Block Attention Residuals（採用、2026-07-30）
-
-深さ方向の残差ルーティングは **Delta Attention Residuals（Cheng Luo, Zefan Cai, Junjie Hu, arXiv:2605.18855）の Block 版を論文どおり採用**した。KaiNomos 独自機構ではなく既知研究の採用として記録する。
-
-```
-sources = [embedding, delta_0, ..., delta_{b-1}, partial_delta]
-K       = norm(V)                     全幅。低ランク射影なし
-logits  = w_lᵀ RMSNorm(source_i)      w_l ∈ ℝ^d、ゼロ初期化
-alpha   = softmax(logits, source軸)
-routed  = h + Σ alpha_i · source_i    加算。置換しない
-h       = h + sublayer_output         ← routed_input には足さない
-```
-
-block境界は layer 3/7/11/15 の FFN 加算後。gate・temperature・entropy 項はいずれも無し（論文どおり）。norm と query は attention 位置と FFN 位置で共有しない。
-
-**参考実装（[wdlctc/delta-attention-residuals-code](https://github.com/wdlctc/delta-attention-residuals-code), MIT）から移植せず論文から実装した。** あのリポジトリには gate 付き・V分離・null source・entropy 正則化など論文が要求しない変種が同梱されており、まとめて持ち込むと別機構になる。
-
-### per-sublayer 版を採用しなかった理由（正確に）
-
-**「Delta Attention Residuals を不採用」ではない。** 論文の per-sublayer 粒度だけを不採用にし、論文準拠の Block 版を採用している。
-
-per-sublayer は論文では PPL でわずかに勝つ（220M で 36.83 対 37.08）。実装して同一 config で実測した結果:
-
-| 粒度 | source数 | mb | tok/s | reserved | 16B所要 |
-|---|---|---|---|---|---|
-| **block（採用）** | 6 | 2 | **1,790** | **20.47 GB** | 103.5日 |
-| sublayer | 32 | 2 | — | **OOM**（23.20GBで失敗） | — |
-| sublayer | 1 | 32 | 902 | 18.84 GB | **205.4日** |
-
-**mb=2 で OOM、mb=1 では速度が半減する**ため不採用。mb=1 はバッチが 2,048 トークンしかなく勾配ノイズが増えるので、0.7% の差を取り切れる保証もなくなる（論文の優位は妥当な batch で測られたもの）。
-
-コードには `delta.granularity = "sublayer"` として残してあり、本番 config では無効。VRAM の余裕が増えたら再測定できる。
-
-### 実装で見つけた点
-
-- **コントローラの AttnRes 用 R head が死んだ。** Delta Block は tier を受け取らないので出力を誰も消費せず勾配が来ない。`ORGAN_MODES` / `organ_mode_counts` / `forward` から R 軸を削除した。あわせて `cost_model` の delta 値読み出しを variable から unavoidable へ移した（常に全 source を読むので固定費）
-- `DeltaRouter` は tier を渡されたら**例外を投げる**。「コントローラに Delta Block を触らせない」を規約ではなくコードで強制している
-- **`torch.stack(sources)` を使わない。** stack は source の全コピーを `[B,T,S,H]` として実体化し autograd が backward まで保持するため、32ルータ位置で **+1.57GB** になった（22.04 → 20.47GB）。source は既にグラフ上のテンソルなので逐次に採点・加算すれば同じ演算でコピーが消える。float64 で 4.44e-16 の厳密一致を確認済み
-- logits は float32 以上で採点する（`_promote`）。bf16 のまま softmax すると近接 source の分解能が落ちる。float64 は降格しないので二重精度テストが意味を持つ
-
-### GPU 検証（120 step、production config）
-
-```
-722,202,344 params   (推論時 676,968,592)   depth query 49,152 + depth norm 49,152
-1,786 tok/s   peak allocated 19.89 GB   reserved 20.47 GB
-非有限値 0件   loss 13.949 → 6.638   grad norm 概ね 3.9〜5.1
-VRAM は step 30 以降まったく増えない（断片化なし）
-旧方式 20.24 GB との差は +0.23 GB
-```
-
-## 6e. 語彙 49,152 への変更（測定済み、2026-07-30）
-
-トークナイザは **DataMix-v2 専用の 49,152 SentencePiece Unigram を1本だけ作成**する方針に決定（別エージェント担当）。32k/48k/64k のモデル訓練比較は行わず、同一標本と held-out で静的検査のみ。特殊ID・round-trip・UNK・byte fallback・領域別圧縮率・語彙使用率に重大な問題がなければ 48k で即時凍結。64k は作らない。
-
-**サイズ変更は不要。** production config で実測した:
-
-| vocab | params | tok/s | reserved | 16B所要 | 余裕 |
-|---|---|---|---|---|---|
-| 32,768 | 722,202,344 | 1,790 | 20.49 GB | 103.5日 | 3.07 GB |
-| **49,152** | **747,368,168** | **1,763** | **21.56 GB** | **105.0日** | **2.00 GB** |
-
-22GB 基準の内側。速度低下1.5%、日数+1.5日。余裕が 2.00GB に減るので、これ以上の語彙拡大や機構追加には注意が必要。
-
-**`eod_token_id = 4` の維持は引き続き必須**（§6c）。`config.vocab_size` は現プールに合わせて 32768 のままにしてある。`train.py` は manifest から読むので、新プール完成時に自動で追随する。
-
-## 6f. 訓練順序 — 現プールはソース別ブロックで並んでいる（実測）
-
-**`data/pool/train.bin` は混ざっていない。** 位置ごとに 2万トークンを復号して測った:
-
-| 位置 | 日本語率 | ASCII率 | 中身 |
-|---|---|---|---|
-| 0% | 0.3% | 99.7% | コード/英語 |
-| 10% | 0.4% | 99.6% | コード/英語 |
-| 20% | 0.0% | 99.8% | コード/英語 |
-| 30% | **81.4%** | 13.1% | 日本語 |
-| 50% | 71.5% | 22.3% | 日本語 |
-| 80% | 83.8% | 10.2% | 日本語 |
-| 98% | 0.0% | 99.6% | コード/英語 |
-
-先頭20%（約4億トークン）が日本語ほぼゼロ、中盤70%が日本語、末尾がまた英語/コード。`SequentialTokenStream` は position 0 から順次読むので、**日本語75%設計のモデルが最初の4億トークンを日本語ゼロで走る**ことになる。設計比率はプール全体の集計としてしか正しくなく、どの時点でも成立していない。
-
-**帰結: 旧 43M ランは日本語を1トークンも見ていない**（45.4M はプールの2.3%で、完全に英語/コードブロックの内側）。あのランの loss 曲線を日本語モデルの挙動として読んではいけない。
-
-### 順序が効く経路（気にすべきもの / しなくていいもの）
-
-効く:
-1. **直近性。** 最後に見たデータが最終モデルに不釣り合いに影響する。mid-training を最後に置く設計はこれを意図的に使っている
-2. **ブロック配置による忘却と再学習。** 切り替わると前半で学んだものを部分的に忘れてから学び直すので、同じトークン数で到達点が下がる。いまのプールがこれ
-
-気にしなくていい:
-3. **易→難のカリキュラム。** 大規模事前学習では効果が小さいか無いという報告が多い
-
-### 新プールでの対策と、残る統合の隙間
-
-`required_pool_artifacts` に `deterministically shuffled train shard manifest` があるので担当者の計画は混ぜる前提。**ただし `SequentialTokenStream` は `train.bin` 単体を順次読むだけで shard manifest を読まない。** したがって:
-
-- **プール構築時にシャッフル済みの順でトークンを書き出してもらう**のが単純で、成果物定義とも一致する（推奨）
-- あるいはローダーを shard manifest 対応にする
-
-どちらかを必ずやること。やらないと 6f 冒頭の状態が新プールでも再現する。訓練開始前に `train.bin` の位置別ドメイン比率を測って混ざっていることを確認するのが確実（測り方は本節冒頭の表と同じ手順）。
-
-## 6g. 語彙 49,152 での再計数比率（標本ベース、2026-07-30）
-
-再計数担当が利用上限で停止したため、全量計数の代わりに**標本ベースの比率**を出した。`recount_ratio.py` と `artifacts-recount-ratio.json`。既知の32k計数値を `ratio` で再スケールすれば予算判断ができる。担当者復帰後の全量計数の検算にも使える。
-
-### 標本は3軸で決定的に分散させている
-
-**再現性だけでは不十分で、代表性が必要。** 先頭ファイルの row group 0 から読むのは完全に決定的でありながら系統的に間違い得る — ソースは通常順序を持つ（クロール日、言語サブセット、品質スコア、タイトル順）。このプールは順序を持つことが確認済み（§6f で `train.bin` がソース別ブロックだった）ので、ソース内部にも順序がある。
-
-- **ファイル間**: 全ファイルに均等ストライド
-- **row group 間**: 0から順ではなく均等間隔
-- **ファイル内**: シーク可能なテキストはバイトオフセットを全域に分散
-
-gzip shard はシークできないので、全shardを使い shard ごとに異なるレコードオフセットを取ることで分散させる。
-
-**偏りの影響は実在した。** 先頭偏り版と分散版の差:
-
-| ソース | 先頭偏り | 分散 | 差 | ファイル間ばらつき |
-|---|---|---|---|---|
-| kasys-ReCaRe | 12.31% | **16.75%** | +4.44pt | 単一ファイル |
-| finepdfs | 10.37% | **7.56%** | **−2.81pt** | **0.850–0.968** |
-| wikisource | 8.10% | 6.11% | −1.99pt | 単一ファイル |
-| wikipedia ja | 6.85% | 7.18% | +0.33pt | 0.922–0.940 |
-| llm-jp-scaling (ja_web) | 6.16% | 6.04% | −0.12pt | 0.938–0.943 |
-| llm-jp-continuation | 4.71% | 3.54% | −1.17pt | 0.949–0.987 |
-| dclm-edu | 3.57% | 3.53% | −0.04pt | 0.963–0.967 |
-| finemath | 3.09% | 3.10% | +0.01pt | 0.965–0.974 |
-| PleIAs-Japanese-PD | 2.48% | 2.47% | −0.01pt | 0.973–0.977 |
-| stack-edu pilot | 0.48% | 0.50% | +0.02pt | 0.993–0.996 |
-| stack-edu r3 | −0.23% | **+0.13%** | +0.36pt | **0.916–1.031** |
-
-**finepdfs が 2.8pt 動いた** — `ja_long_form` の最大ソースで、ばらつきも 0.850–0.968 と広い。先頭2ファイルだけ見ていた版は偏っていた。
-
-**`stack-edu r3` のばらつきは 1.0 を跨ぐ**（0.916–1.031）。言語別ディレクトリで符号が反転する。集約 +0.13% はほぼゼロなので**コードは48kで改善しない**が、以前「悪化する（−0.23%）」と書いたのは先頭偏りによるもので、訂正する。
-
-`ratio_stdev` が大きいソースは集約値が多くを担っているので、全量再計数の価値が高い。判断前に `ratio_min` / `ratio_max` を見ること。
-
-**読取不能ソースは平均に混ぜず `failed` 配列に理由とファイル数つきで記録する。** `HuggingFaceFW-finepdfs-download` は実際に空ディレクトリだった。
-
-### ja_reference_formal は目標割れする（暫定試算）
-
-この領域は全ソースが平均を上回る。分散版の比率で:
-
-```
-Wikipedia     1,610,075,462 × 0.9282 = 1,494,472,000
-Wikisource       44,450,893 × 0.9389 =    41,734,000
-ReCaRe           20,227,144 × 0.8325 =    16,839,000
-finepdfs許諾    102,964,461 × 0.9244 =    95,180,000
-候補計                                 1,648,225,000
-目標                                   1,600,000,000
-余裕                                      48,225,000 = 3.0%   ← 横断dedup の前
-```
-
-候補の90.6%が Wikipedia で、Wikipedia 由来は finepdfs や web crawl に大量にミラーされている。**横断重複除去で削られる本命がここ。3.0%では耐えられない可能性が高い。**
-
-`ja_long_form` は候補 3,708,034,081 に finepdfs 7.56%・PleIAs 2.47% を適用して約 3,430,000,000、目標 2,400,000,000 で**余裕 43%**。
-
-### 重み振り替えは暫定案（凍結しない）
-
-振り替え（例: formal 0.10 → 0.09、long_form 0.15 → 0.16）は訓練開始前なので原則上は可能だが、**現時点では暫定案として扱う。**
-
-**全量再計数と横断dedup後の実利用可能量を確認してから、最終manifestで一度だけ凍結する。学習結果を見た後の再調整は行わない。** 上の試算は標本ベースであり、凍結の根拠にはしない。
-
-## 7. 次にやること（この順で）
-
-コード側は完成して待ちに入っている。ブロッカーは2つとも外部。
-
-| ブロッカー | 状態 | 担当 |
-|---|---|---|
-| PSU 交換 | 1000W が 2026-07-30 到着予定 | ユーザー |
-| DataMix v2 + 49,152 トークナイザ | 構築中（§6c, §6e） | 別エージェント |
-
-### 待ちが解けたらやること
-
-1. **PSU 交換後、短い実機確認**（数百step）。交換で本当に落ちなくなったかを見る。旧構成は15〜40分で2回落ちている
-2. 新プールの manifest を確認する。`train.py` は vocab_size を manifest から読むので `config.vocab_size` を直す必要はないが、**`<|eod|>` が id 4 であることは必ず確認する**（§6c。違うと例外を出さず境界処理が静かに間違う）
-3. 訓練開始。dense 1本、Muon、16B固定比率フェーズ
-
-   **`--max-epochs` を忘れると `EpochLimitReached` で止まる。`--schedule-tokens` を忘れるとセグメントごとに cosine がやり直しになる。** 下のコマンド形は4ステップ分だけ実機検証済み（§0。ただし h896/mb=4 で検証したので、mb と token 数は本番値に差し替えてある）。
-   ```bash
-   PY=~/デスクトップ/mini_kimi_organism/.venv/bin/python
-   PYTHONPATH=. PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True $PY -m train \
-     --arm dense --optimizer muon --seed 11 --micro-batch 2 \
-     --target-tokens 16000000000 --schedule-tokens 16000000000 --max-epochs 4 \
-     --device cuda --allow-gpu \
-     --data-dir data/pool --run-dir runs/dense_seed11
-   ```
-   夜間セグメントで刻むなら `--additional-tokens` を使う（`--target-tokens` は**累積到達点**なので同じ値で再実行すると何も学習しない）。`--schedule-tokens` は毎回 16000000000 を渡す（全計画期間。セグメントごとに変えると cosine が毎回やり直しになる）。resume 時は `--schedule-tokens` 省略でも checkpoint から継承される
-4. 観測ラダー（§6b）が 50M / 100M / 200M ... で `runs/<run>/observations/` に重み専用 snapshot を落とす。1本 3.0GB（747M×4byte）、13点で約39GB
-5. `eval.py` で validation / test NLL
-
-### 待たずに着手できるもの（優先順）
-
-1. ~~観測スクリプト~~ → **`observe.py` として実装済み**（下記）。次は分野別の分割定義を新プールの `source-provenance.json` から作ること
-2. **旧・観測スクリプト項目（§6b）。** ユーザーの目的は最終スコアではなく「育つ過程を観察し、会話して成長を感じ、非線形な立ち上がりがあるか見ること」で、その道具が何もない。必要なもの:
-   - 分野別 validation NLL（プールはソース情報を持っている）
-   - 固定プロンプト集からの生成、サンプリング seed も固定 = 成長日記
-   - 1ファイルに追記していく成長ログ
-   - **生成経路の動作確認が前提。** `respect_documents=False` で呼ぶ必要がある（`mla.py` は cache と文書マスクの併用で `NotImplementedError` を投げる。生成時は文書境界がないので False が正しい）。この経路はまだ一度も実行していない
-2. **使い捨て会話LoRA**（§6b）。主要 snapshot に同一の小規模会話SFTを当てて会話し、Base 能力の成長だけを比べる
-3. **best-fit packing**（§5）。文書の切り詰めを減らす。`train.bin` 再構築が必要なので新プール構築と合わせるのが自然
-4. legacy 比較 mode（`legacy_gated_lowrank`）。§6d の後退確認用。任意
-
-### 触ると測定値が崩れるもの
-
-- MLA の `q_lora_rank` / `kv_lora_rank` = 224、`decay_rank` = 112。h896 構成からの比率で決めた値で、**これが 747,368,168 param / 21.56GB / 1,763 tok/s を出した実測構成そのもの**。変えるなら §6e の表を測り直すこと
-- `delta.granularity` は `"block"`。`"sublayer"` は mb=2 で OOM する（§6d）
-
----
-
-## 8. 運用ルール（旧版から引き継ぐもの）
-
-- **`pgrep -f` で生死判定しない。** 自分のシェルにマッチして誤報する。PID直指定か `train.jsonl` 最終行のタイムスタンプで見る
-- 連続長時間稼働をさせない。1セグメント終わったら休憩
-- トークン数を揃えるときは**時計ではなくトークンで**
-- `trust_remote_code=True` は使わない（parquet ブランチのみ）
-- 旧世代フォルダ（`mini_kimi_organism/`, `K3Mini-82M/`, `K3-Mini*/`）は**消さずに保存**。結果は確定済み
-- **旧チェックポイント（`.pt`）は 2026-07-30 に削除済み**（ユーザー承認）。config が非互換に変わっているため復元しても読めない（decay_rank、attn_norm 追加、MUDD norm 削除、d_model、FFN幅）。消したのは 3.81GB 分の重みのみ:
-  ```
-  runs/base_seed11/step_00000600.pt, step_00000700.pt   43Mランの重み
-  runs/kainomos_110m_init.pt                            旧移植 init (h512)
-  runs/kainomos_110m_init_v2.pt                         修正版移植 init (h512)
-  runs/smoke.pt                                         gpu_smoke の出力
-  ```
-- **ログと証拠は意図的に残してある**（約11MB）。`.pt` と一緒に消してはいけない:
-  | ファイル | なぜ残すか |
-  |---|---|
-  | `runs/base_seed11/train.jsonl` | 43Mランの訓練ログ753行。**§1(c) が引用している `all/1792:2176 = 0.0` の実物**。消すとメモが存在しない証拠を参照することになる |
-  | `train.jsonl.raw_backup` | 破損行除去前の生ログ |
-  | `runs/gpu_telemetry.csv` | クラッシュした夜の最後5分。**PSU 診断の唯一の証拠**（`00:43:33, 55°C, fan 92%, 260.71W` の直後に消失） |
-  | `gpu_smoke.json`, `overnight.log` | 履歴 |
-- `kainomos_110m_init_v2.pt` が必要になったら再生成できる（§3 の修正は全部コードに入っており、82M ソースと旧トークナイザも健在）:
-  ```bash
-  PYTHONPATH=. $PY -m migrate_vocab \
-    --source ../K3Mini-82M/runs/base_seed11/milestone_1_step00001526.pt \
-    --old-tokenizer-dir ~/デスクトップ/mini_kimi_organism/data/tokenizer \
-    --new-tokenizer data/tokenizer/kainomos.model \
-    --booster-scale 0.1 --out runs/kainomos_110m_init_v2.pt
-  ```
-  ただし h512 構成用なので、現在の h1536 では使えない
-- 汚染除去は3回のユーザー指摘で作り直した経緯があり、単純化しないこと。`aio-passages` は NIILC ではない／照合単位は canonical record／主判定は評価レコードのカバレッジで n-gram 個数ではない。ルールは `contamination_match.py` の `RULES`
-- 名前: 対外的には **KaiNomos**。「+++」表記を使わない。Kimi K3 を名前に入れない。タグラインは「Reforming the laws of compute allocation. / 計算資源配分の法則を作り変える。」
-  - **パラメータが 722,500,872 になったので「110M」は実数と合わない。** 改名するか容量を戻すかは未決定。ユーザーは「後で決めるので今は触らない」と明言している。ディレクトリ名・リポジトリ名は据え置き
-
-## 9. ユーザーとの仕事のしかた
-
-- **断定して進める。** 曖昧にぼかしたり、実験の提案だけして実行しない、をしない。コードを走らせて検証する
-- 実験を細分化しない。いきなり完全版を動かして、性能が上がるか上がらないかだけ見る
-- 結果は正直に。落ちたら落ちたと出力つきで言う。飛ばした手順は飛ばしたと言う
-- **論文を読まずに論文由来の実装をしない。** 今回 QK-Normed MLA は実際に取得して手法を確認した。要約だけで実装すると等価性が壊れる
-- ユーザーは根拠を出せば方針を変える。「ルーティングをやめる」も実測を見せた結果の判断だった。逆に、こちらの推奨が**別の目的関数を最適化していないか**は毎回確認すること（一度 h640 を「推奨」したが、それは速度・電力・日数のバランスを取ったもので、ユーザーの目的である最高性能とは別物だった）
-
-## 10. テスト
-
-```bash
-PY=~/デスクトップ/mini_kimi_organism/.venv/bin/python
-PYTHONPATH=. $PY -m pytest tests/ -q       # 40 passed（GPU varlen テスト含む、約3.5分）
-```
-
-GPU テスト（`test_varlen_kernel_isolates_documents_on_gpu`）は Triton の初回 JIT で数分かかる。CUDA がなければ自動 skip。
-
-`tests/test_documents.py` の4本が §5 の完了条件そのもの: varlen が文書ごと個別実行と forward/入力勾配/パラメータ勾配で一致、境界独立性、loss境界が1箇所だけ、QK-norm の健全性。
+Implementation checks and the single-GPU smoke path are complete. Full
+pre-training, held-out evaluation and trained weight publication remain pending.
+Do not claim model quality before those artifacts exist.

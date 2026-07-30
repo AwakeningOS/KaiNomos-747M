@@ -19,9 +19,9 @@ published behaviour rather than an identity the paper does not claim.
 
 import torch
 
-from config import K3MiniPlusPlusPlusConfig as Config
+from config import KaiNomosConfig as Config
 from delta_block import DeltaBank, DeltaRouter
-from model import K3MiniPlusPlusPlusForCausalLM as Model
+from model import KaiNomosForCausalLM as Model
 
 
 def test_bank_stores_deltas_and_the_embedding_not_hidden_states():
@@ -82,18 +82,11 @@ def test_zero_initialised_query_gives_the_mean_of_the_sources():
                           torch.full((1, 1, 8), 2.0, dtype=torch.float64))
 
 
-def test_no_gate_no_low_rank_key_and_no_controller_hook():
+def test_no_gate_and_no_low_rank_key():
     router = DeltaRouter(8)
     names = dict(router.named_parameters())
     assert set(names) == {"norm.weight", "query"}, sorted(names)
     assert names["query"].shape == (8,)          # w_l in R^d, full width
-    try:
-        router(torch.randn(1, 1, 8), [torch.randn(1, 1, 8)],
-               tier=torch.ones(1, 1, 4))
-    except ValueError as error:
-        assert "not under controller control" in str(error)
-    else:
-        raise AssertionError("a controller tier must be rejected")
 
 
 def test_the_residual_stream_is_the_embedding_plus_every_block_delta():
@@ -103,7 +96,6 @@ def test_the_residual_stream_is_the_embedding_plus_every_block_delta():
     stream and this sum would stop reconstructing it.
     """
     cfg = Config.tiny()
-    cfg.joint_route.enabled = False
     cfg.kda_impl = "reference"
     torch.manual_seed(5)
     model = Model(cfg).double().eval()
@@ -133,7 +125,6 @@ def test_the_residual_stream_is_the_embedding_plus_every_block_delta():
 
 def test_depth_queries_receive_gradient_in_both_kda_and_mla_layers():
     cfg = Config.tiny()
-    cfg.joint_route.enabled = False
     cfg.kda_impl = "reference"
     torch.manual_seed(7)
     model = Model(cfg)

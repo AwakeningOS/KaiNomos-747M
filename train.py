@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import bisect
+import concurrent.futures
 import hashlib
 import json
 import math
@@ -14,16 +16,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from config import K3MiniPlusPlusPlusConfig as K3MiniConfig
-from joint_router import RouteState
-from cost_model import OrganCosts
-from route_eval import merge_decisions, solve_batch_price
-
-# The pre-registered budget is a *ratio to Fixed-Full*; a run whose cumulative
-# executed cost lands outside this band did not train at the compute it claims,
-# so its NLL comparison is void.
-BUDGET_TOLERANCE = 0.001
-from model import K3MiniPlusPlusPlusForCausalLM as K3MiniForCausalLM
+from config import KaiNomosConfig
+from model import KaiNomosForCausalLM
 
 
 @dataclass
@@ -48,7 +42,7 @@ class TrainConfig:
     schedule_tokens: int = 0            # 0 == use target_tokens
     warmup_fraction: float = 0.01
     min_lr_ratio: float = 0.1
-    checkpoint_every_steps: int = 100
+    checkpoint_every_steps: int = 50
     # Fractions of the token budget that get a checkpoint exempt from rotation,
     # so no later analysis ever needs a retraining run.
     milestone_fractions: tuple[float, ...] = (0.5, 1.0)
@@ -70,133 +64,136 @@ class TrainConfig:
         8_000_000_000, 12_000_000_000, 16_000_000_000, 20_000_000_000,
     )
     precision: str = "bf16"
-    budget_rho: float = 10.0
-    dual_learning_rate: float = 0.05
-    price_offset_gain: float = 0.5
-    cost_ema_decay: float = 0.99
 
     @property
     def tokens_per_step(self) -> int:
         return self.sequence_length * self.micro_batch_size * self.gradient_accumulation_steps
 
 
-class SequentialTokenStream:
-    """Deterministic uint16 token stream whose position is checkpointed."""
+class ShardedTokenStream:
+    """Deterministic uint16 shard stream whose global position is checkpointed."""
 
-    def __init__(self, path: Path, sequence_length: int, batch_size: int, position: int = 0,
-                 max_epochs: int | None = 1, epochs: int = 0):
-        self.path = path
-        self.tokens = np.memmap(path, mode="r", dtype=np.uint16)
+    def __init__(
+        self,
+        paths: list[Path],
+        sequence_length: int,
+        batch_size: int,
+        position: int = 0,
+        max_epochs: int | None = 1,
+        epochs: int = 0,
+        prefetch: bool = True,
+    ):
+        if not paths:
+            raise ValueError("at least one train shard is required")
+        self.paths = [Path(path) for path in paths]
+        itemsize = np.dtype(np.uint16).itemsize
+        self.lengths = []
+        for path in self.paths:
+            if path.stat().st_size % itemsize:
+                raise ValueError(f"token shard has an invalid byte length: {path}")
+            self.lengths.append(path.stat().st_size // itemsize)
+        self.ends = np.cumsum(self.lengths, dtype=np.int64).tolist()
+        self.total_tokens = int(self.ends[-1])
         self.sequence_length = sequence_length
         self.batch_size = batch_size
-        self.position = int(position)
-        # Wrapping past the end of the pool means seeing the same tokens again.
-        # It used to happen silently, so a run could slide into a second epoch --
-        # and into memorisation -- with nothing in the log to say so.
         self.max_epochs = max_epochs
         self.epochs = int(epochs)
-        if len(self.tokens) <= sequence_length:
-            raise ValueError("token file is shorter than one sequence")
+        self.prefetch = prefetch
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        self._future = None
+        self._future_index = None
+        self._current = None
+        self._current_index = None
+        self._position = 0
+        if self.total_tokens <= sequence_length:
+            raise ValueError("train shards are shorter than one sequence")
+        self.position = position
+
+    @property
+    def position(self) -> int:
+        return self._position
+
+    @position.setter
+    def position(self, value: int) -> None:
+        value = int(value)
+        if value < 0 or value > self.total_tokens:
+            raise ValueError("stream position is outside the train shards")
+        self._position = value
+        self._current = None
+        self._current_index = None
+        if self._future is not None:
+            self._future.cancel()
+        self._future = None
+        self._future_index = None
+
+    def _load(self, index: int) -> np.ndarray:
+        values = np.fromfile(self.paths[index], dtype=np.uint16)
+        if len(values) != self.lengths[index]:
+            raise RuntimeError(f"short read from token shard: {self.paths[index]}")
+        return values
+
+    def _schedule(self, index: int) -> None:
+        if self.prefetch and index < len(self.paths) and self._future_index != index:
+            self._future = self._executor.submit(self._load, index)
+            self._future_index = index
+
+    def _ensure_current(self) -> tuple[np.ndarray, int]:
+        if self._position == self.total_tokens:
+            self.epochs += 1
+            if self.max_epochs is not None and self.epochs >= self.max_epochs:
+                raise EpochLimitReached(
+                    f"reached the end of the train shards after {self.epochs} "
+                    "epoch(s); raise --max-epochs to repeat the pool"
+                )
+            self.position = 0
+        index = bisect.bisect_right(self.ends, self._position)
+        if self._current_index != index:
+            if self._future_index == index and self._future is not None:
+                self._current = self._future.result()
+            else:
+                self._current = self._load(index)
+            self._current_index = index
+            self._future = None
+            self._future_index = None
+            self._schedule(index + 1)
+        start = 0 if index == 0 else self.ends[index - 1]
+        return self._current, self._position - start
+
+    def _take(self, count: int) -> np.ndarray:
+        pieces = []
+        remaining = count
+        while remaining:
+            current, offset = self._ensure_current()
+            take = min(remaining, len(current) - offset)
+            pieces.append(current[offset:offset + take])
+            self._position += take
+            remaining -= take
+        return pieces[0] if len(pieces) == 1 else np.concatenate(pieces)
 
     def next(self) -> torch.Tensor:
-        width = self.sequence_length
-        rows = []
-        for _ in range(self.batch_size):
-            if self.position + width > len(self.tokens):
-                self.epochs += 1
-                if self.max_epochs is not None and self.epochs >= self.max_epochs:
-                    raise EpochLimitReached(
-                        f"reached the end of {self.path.name} after "
-                        f"{self.epochs} epoch(s); pass --max-epochs to allow "
-                        f"repeating the pool"
-                    )
-                self.position = 0
-            rows.append(np.asarray(self.tokens[self.position:self.position + width], dtype=np.int64))
-            self.position += width
-        return torch.from_numpy(np.stack(rows))
+        values = self._take(self.sequence_length * self.batch_size)
+        return torch.from_numpy(
+            np.asarray(values, dtype=np.int64).reshape(
+                self.batch_size, self.sequence_length
+            )
+        )
+
+    def close(self) -> None:
+        if self._future is not None:
+            self._future.cancel()
+        self._executor.shutdown(wait=True, cancel_futures=True)
+
+    def __del__(self) -> None:
+        executor = getattr(self, "_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
 
 
 class EpochLimitReached(RuntimeError):
     """The token pool ran out and repeating it was not explicitly allowed."""
 
 
-def collect_route_counts(decisions, totals: dict[str, list[float]]) -> None:
-    for layer_index, decision in enumerate(decisions):
-        for organ, onehot in decision.hard_modes.items():
-            counts = onehot.detach().float().sum(
-                dim=tuple(range(onehot.ndim - 1))
-            ).cpu().tolist()
-            for key in (organ, f"{organ}@{layer_index}"):
-                if key not in totals:
-                    totals[key] = [0.0] * len(counts)
-                totals[key] = [
-                    a + float(b) for a, b in zip(totals[key], counts)
-                ]
-
-
-def normalised_route_usage(counts: dict[str, list[float]]) -> dict[str, list[float]]:
-    result = {}
-    for organ, values in counts.items():
-        total = sum(values)
-        result[organ] = [value / total if total else 0.0 for value in values]
-    return result
-
-
-def build_static_patterns(
-    layer_mode_counts: dict[str, list[float]], pattern_length: int = 256
-) -> dict[str, tuple[int, ...]]:
-    """Convert validation mode ratios to deterministic content-free patterns."""
-    if pattern_length < 1:
-        raise ValueError("pattern_length must be positive")
-    patterns = {}
-    for key, values in layer_mode_counts.items():
-        if "@" not in key:
-            continue
-        total = sum(values)
-        if total <= 0:
-            continue
-        targets = [value / total for value in values]
-        used = [0] * len(values)
-        pattern = []
-        for position in range(pattern_length):
-            # Largest deficit creates a deterministic, approximately even
-            # distribution instead of clumping each mode into one interval.
-            mode = max(
-                range(len(values)),
-                key=lambda index: targets[index] * (position + 1) - used[index],
-            )
-            pattern.append(mode)
-            used[mode] += 1
-        patterns[key] = tuple(pattern)
-    return patterns
-
-
-def ffn_gradient_band_norms(
-    model: K3MiniForCausalLM, tiers: tuple[int, ...]
-) -> dict[str, float]:
-    result = {}
-    start = 0
-    for end in tiers:
-        squared = 0.0
-        for layer_index, layer in enumerate(model.model.layers):
-            layer_squared = 0.0
-            for grad in (
-                layer.ffn.gate_proj.weight.grad,
-                layer.ffn.up_proj.weight.grad,
-            ):
-                if grad is not None:
-                    layer_squared += float(grad[start:end].float().square().sum())
-            grad = layer.ffn.down_proj.weight.grad
-            if grad is not None:
-                layer_squared += float(grad[:, start:end].float().square().sum())
-            squared += layer_squared
-            result[f"layer_{layer_index}/{start}:{end}"] = layer_squared ** 0.5
-        result[f"all/{start}:{end}"] = squared ** 0.5
-        start = end
-    return result
-
-
-def parameter_groups(model: K3MiniForCausalLM, weight_decay: float) -> list[dict]:
+def parameter_groups(model: KaiNomosForCausalLM, weight_decay: float) -> list[dict]:
     """Split the parameters that must not be shrunk from the matrices that may be.
 
     Weight decay on a matrix is a prior towards a smaller map. On the tensors
@@ -204,7 +201,7 @@ def parameter_groups(model: K3MiniForCausalLM, weight_decay: float) -> list[dict
 
     * `A_log` and `dt_bias` set the KDA decay timescale. Decaying them drags the
       forgetting rate towards a fixed point that has nothing to do with the loss.
-    * RMSNorm weights carry the migrated 82M scales (layer 0's mean is 0.9024).
+    * RMSNorm gains should not be pulled away from their normalization role.
     * `static_bias` is MUDD's identity selector, exactly 1.0 on the newest source.
       Nothing in the loss defends it, so decay alone would erode it towards 0 and
       dissolve the identity initialisation the mechanism is built on.
@@ -230,7 +227,7 @@ def parameter_groups(model: K3MiniForCausalLM, weight_decay: float) -> list[dict
     ]
 
 
-def build_optimizer(model: K3MiniForCausalLM, train_cfg: TrainConfig, kind: str):
+def build_optimizer(model: KaiNomosForCausalLM, train_cfg: TrainConfig, kind: str):
     """AdamW over everything, or Muon over the matrices with AdamW beside it.
 
     Each group records its own peak rate under `base_lr`, because a Muon rate and
@@ -308,6 +305,42 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def manifest_vocab_size(manifest: dict) -> int:
+    value = manifest.get("tokenizer", {}).get(
+        "vocab_size", manifest.get("vocab_size")
+    )
+    if value is None:
+        raise ValueError("manifest must declare tokenizer vocabulary size")
+    return int(value)
+
+
+def manifest_split_paths(manifest: dict, data_dir: Path, split: str) -> list[Path]:
+    declared = manifest.get("splits", {}).get(split, {})
+    shards = declared.get("shards")
+    names = (
+        [str(item["path"] if isinstance(item, dict) else item) for item in shards]
+        if shards else [f"{split}.bin"]
+    )
+    root = data_dir.resolve()
+    paths = []
+    for name in names:
+        path = (root / name).resolve()
+        try:
+            path.relative_to(root)
+        except ValueError as error:
+            raise ValueError(f"{split} shard escapes data-dir: {name}") from error
+        if not path.is_file():
+            raise FileNotFoundError(f"missing {split} shard: {path}")
+        paths.append(path)
+    measured = sum(path.stat().st_size for path in paths) // np.dtype(np.uint16).itemsize
+    expected = declared.get("tokens")
+    if expected is not None and int(expected) != measured:
+        raise ValueError(
+            f"manifest declares {expected} {split} tokens but shards contain {measured}"
+        )
+    return paths
+
+
 def checkpoint_paths(run_dir: Path) -> list[Path]:
     return sorted(run_dir.glob("step_*.pt"))
 
@@ -320,15 +353,15 @@ def retain_latest(run_dir: Path, keep: int) -> None:
 
 def save_checkpoint(
     path: Path,
-    model: K3MiniForCausalLM,
+    model: KaiNomosForCausalLM,
     optimizer: torch.optim.Optimizer,
     step: int,
     tokens_done: int,
     data_position: int,
-    model_config: K3MiniConfig,
+    model_config: KaiNomosConfig,
     train_config: TrainConfig,
     manifest_hash: str,
-    joint_route_state: dict | None = None,
+    training_state: dict | None = None,
 ) -> None:
     payload = {
         "model": model.state_dict(),
@@ -343,7 +376,7 @@ def save_checkpoint(
         "numpy_rng": np.random.get_state(),
         "torch_rng": torch.get_rng_state(),
         "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
-        "joint_route_state": joint_route_state or {"price": 0.0, "cost_ema": None},
+        "training_state": training_state or {},
     }
     temporary = path.with_suffix(path.suffix + ".tmp")
     torch.save(payload, temporary)
@@ -351,7 +384,7 @@ def save_checkpoint(
 
 
 def save_observation(
-    run_dir: Path, model: K3MiniForCausalLM, model_config: K3MiniConfig,
+    run_dir: Path, model: KaiNomosForCausalLM, model_config: KaiNomosConfig,
     step: int, tokens_done: int, mark: int,
 ) -> Path:
     """A weights-only snapshot for reading the model as it grows.
@@ -386,26 +419,22 @@ def train(args: argparse.Namespace) -> None:
     if args.device.startswith("cuda") and not args.allow_gpu:
         raise SystemExit("GPU use requires the explicit --allow-gpu flag")
     device = torch.device(args.device)
-    model_cfg = K3MiniConfig()
+    model_cfg = KaiNomosConfig()
     train_cfg = TrainConfig()
-    # The vocabulary is a property of the pool, not of the model defaults: the
-    # tokenizer changed with the data and the two must not drift apart.
-    model_cfg.vocab_size = json.loads(
-        (Path(args.data_dir) / "manifest.json").read_text())["vocab_size"]
+    data_dir = Path(args.data_dir)
+    manifest_path = data_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    # The vocabulary is a property of the pool, not of the model defaults.
+    model_cfg.vocab_size = manifest_vocab_size(manifest)
     model_cfg.tie_word_embeddings = True
 
-    # `dense` builds no controller at all.  `base` and `adaptive` keep the
-    # supernet and differ only in force_fixed, for reproducing the routed runs.
-    arm = getattr(args, "arm", "dense")
-    model_cfg.joint_route.enabled = arm != "dense"
-    model_cfg.joint_route.force_fixed = arm == "base"
     if getattr(args, "seed", None) is not None:
         train_cfg.seed = args.seed
     if getattr(args, "target_tokens", None):
         train_cfg.target_tokens = args.target_tokens
     if getattr(args, "schedule_tokens", None):
         train_cfg.schedule_tokens = args.schedule_tokens
-    train_cfg.optimizer = getattr(args, "optimizer", "adamw")
+    train_cfg.optimizer = getattr(args, "optimizer", "muon")
     if getattr(args, "muon_lr", None):
         train_cfg.muon_learning_rate = args.muon_lr
     if getattr(args, "warmup_fraction", None):
@@ -421,43 +450,19 @@ def train(args: argparse.Namespace) -> None:
     if train_cfg.sequence_length != model_cfg.context_length_train:
         raise ValueError("training sequence length must match model context_length_train")
 
-    data_dir = Path(args.data_dir)
-    manifest_path = data_dir / "manifest.json"
-    train_path = data_dir / "train.bin"
     manifest_hash = sha256(manifest_path)
-    manifest = json.loads(manifest_path.read_text())
-    if manifest["tokenizer"]["vocab_size"] != model_cfg.vocab_size:
-        raise ValueError("dataset tokenizer vocabulary does not match model vocabulary")
+    train_paths = manifest_split_paths(manifest, data_dir, "train")
+    if int(manifest.get("eod_token_id", model_cfg.eod_token_id)) != model_cfg.eod_token_id:
+        raise ValueError("dataset EOD token does not match model configuration")
 
     random.seed(train_cfg.seed)
     np.random.seed(train_cfg.seed)
     torch.manual_seed(train_cfg.seed)
-    model = K3MiniForCausalLM(model_cfg).to(device)
-    if getattr(args, "init_from", None):
-        # A 110M init produced by migrate_82m_to_110m.py.  Both arms load the
-        # same file, so they start from identical weights and differ only in
-        # force_fixed -- the widening, cloning and damping already happened
-        # during migration and must not be redone per arm.
-        blob = torch.load(args.init_from, map_location="cpu", weights_only=False)
-        state = blob.get("model", blob) if isinstance(blob, dict) else blob
-        missing, unexpected = model.load_state_dict(state, strict=False)
-        model.to(device)
-        print(f"[init] loaded migrated 110M weights from {args.init_from}: "
-              f"{len(state)} tensors, {len(missing)} missing, "
-              f"{len(unexpected)} unexpected", flush=True)
+    model = KaiNomosForCausalLM(model_cfg).to(device)
     optimizer = build_optimizer(model, train_cfg, train_cfg.optimizer)
     run_dir = Path(args.run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     step = tokens_done = data_position = 0
-    route_price = model_cfg.joint_route.price
-    cost_ema = None
-    cumulative_route_counts: dict[str, list[float]] = {}
-    # Cumulative *executed* analytical cost, so the run can state what compute it
-    # actually spent rather than what it was aiming at.  The predecessor
-    # experiment was invalidated by a 1.3% gap between the two.
-    cumulative_cost_sum = 0.0
-    cumulative_cost_tokens = 0
-    price_offset = 0.0
     epochs_done = 0
 
     resume = latest_checkpoint(run_dir)
@@ -484,14 +489,8 @@ def train(args: argparse.Namespace) -> None:
         torch.set_rng_state(checkpoint["torch_rng"])
         if checkpoint["cuda_rng"] is not None and device.type == "cuda":
             torch.cuda.set_rng_state_all(checkpoint["cuda_rng"])
-        saved_route = checkpoint.get("joint_route_state", {})
-        route_price = float(saved_route.get("price", route_price))
-        cost_ema = saved_route.get("cost_ema")
-        cumulative_route_counts = saved_route.get("route_mode_counts", {})
-        price_offset = float(saved_route.get("price_offset", 0.0))
-        cumulative_cost_sum = float(saved_route.get("cumulative_cost_sum", 0.0))
-        cumulative_cost_tokens = int(saved_route.get("cumulative_cost_tokens", 0))
-        epochs_done = int(saved_route.get("epochs_done", 0))
+        training_state = checkpoint.get("training_state", {})
+        epochs_done = int(training_state.get("epochs_done", 0))
         saved_train = checkpoint.get("train_config") or {}
         # `--target-tokens` is a cumulative destination, so re-running a finished
         # segment with the same value trains nothing at all: `tokens_done` is
@@ -514,19 +513,19 @@ def train(args: argparse.Namespace) -> None:
             f"--additional-tokens N to train N more tokens from here."
         )
 
-    stream = SequentialTokenStream(
-        train_path, train_cfg.sequence_length, train_cfg.micro_batch_size, data_position,
+    stream = ShardedTokenStream(
+        train_paths, train_cfg.sequence_length, train_cfg.micro_batch_size, data_position,
         max_epochs=args.max_epochs, epochs=epochs_done,
     )
-    remaining = (len(stream.tokens) - data_position) + (
-        (args.max_epochs - 1 - epochs_done) * len(stream.tokens)
+    remaining = (stream.total_tokens - data_position) + (
+        (args.max_epochs - 1 - epochs_done) * stream.total_tokens
         if args.max_epochs is not None else 0
     )
     wanted = train_cfg.target_tokens - tokens_done
     if args.max_epochs is not None and wanted > remaining:
         raise SystemExit(
             f"the target needs {wanted:,} more tokens but only {remaining:,} remain "
-            f"within --max-epochs {args.max_epochs} of a {len(stream.tokens):,}-token "
+            f"within --max-epochs {args.max_epochs} of a {stream.total_tokens:,}-token "
             f"pool.  Raise --max-epochs to reuse the pool deliberately."
         )
     dtype = torch.bfloat16 if train_cfg.precision == "bf16" else torch.float32
@@ -536,13 +535,8 @@ def train(args: argparse.Namespace) -> None:
     while tokens_done < train_cfg.target_tokens:
         optimizer.zero_grad(set_to_none=True)
         loss_sum = 0.0
-        cost_sum = 0.0
         ntp_sum = 0.0
         mtp_sum = 0.0
-        step_route_counts: dict[str, list[float]] = {}
-        # every micro-batch's decisions, so the price is solved from the whole
-        # step rather than from whichever micro-batch happened to run last
-        step_decisions: list[list] = []
         for _ in range(train_cfg.gradient_accumulation_steps):
             ids = stream.next().to(device, non_blocking=True)
             with torch.autocast(
@@ -550,31 +544,8 @@ def train(args: argparse.Namespace) -> None:
                 dtype=dtype,
                 enabled=(dtype != torch.float32 and device.type != "cpu"),
             ):
-                # Train with the *deployed* policy.  Gumbel sampling trains one
-                # policy and deploys another: at 82M the sampled policy sat on
-                # budget while its argmax counterpart spent 5.3% more, because
-                # argmax always takes the expensive side of a distribution that
-                # sampling only visits sometimes.  Selecting by argmax with a
-                # straight-through gradient makes the trained and deployed
-                # policies the same object, so one price closes both.
-                output = model(
-                    ids, labels=ids,
-                    route_state=RouteState(
-                        price=route_price, hard=True,
-                        force_fixed=model_cfg.joint_route.force_fixed,
-                    ),
-                )
-                # Fixed-Full runs without a controller, so it has no cost to
-                # constrain; its executed cost is the 1.0 normaliser by definition.
-                if output.expected_cost is None:
-                    loss = output.loss / train_cfg.gradient_accumulation_steps
-                else:
-                    gap = output.expected_cost - output.cost_target
-                    budget_loss = (
-                        route_price * gap
-                        + 0.5 * train_cfg.budget_rho * torch.relu(gap).square()
-                    )
-                    loss = (output.loss + budget_loss) / train_cfg.gradient_accumulation_steps
+                output = model(ids, labels=ids)
+                loss = output.loss / train_cfg.gradient_accumulation_steps
             if not torch.isfinite(loss):
                 raise FloatingPointError(f"non-finite loss at step {step + 1}")
             loss.backward()
@@ -583,19 +554,10 @@ def train(args: argparse.Namespace) -> None:
                 ntp_sum += float(output.ntp_loss.detach()) / train_cfg.gradient_accumulation_steps
             if output.mtp_loss is not None:
                 mtp_sum += float(output.mtp_loss.detach()) / train_cfg.gradient_accumulation_steps
-            cost_sum += (
-                1.0 if output.expected_cost is None
-                else float(output.expected_cost.detach())
-            ) / train_cfg.gradient_accumulation_steps
-            collect_route_counts(output.joint_decisions, step_route_counts)
-            step_decisions.append(output.joint_decisions)
 
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.max_grad_norm)
         if not torch.isfinite(grad_norm):
             raise FloatingPointError(f"non-finite gradient norm at step {step + 1}")
-        ffn_gradients = ffn_gradient_band_norms(
-            model, model_cfg.joint_route.ffn_width_tiers
-        )
         # The rate for the tokens this step is about to consume, not the ones
         # already consumed: at `tokens_done` the very first step would run at
         # 1/warmup of the peak, which is 7.6e-12 -- a step thrown away.
@@ -603,39 +565,8 @@ def train(args: argparse.Namespace) -> None:
                                          train_cfg)
         apply_learning_rate(optimizer, learning_rate, train_cfg)
         optimizer.step()
-        for organ, values in step_route_counts.items():
-            if organ not in cumulative_route_counts:
-                cumulative_route_counts[organ] = [0.0] * len(values)
-            cumulative_route_counts[organ] = [
-                a + b for a, b in zip(cumulative_route_counts[organ], values)
-            ]
-        cost_ema = cost_sum if cost_ema is None else (
-            train_cfg.cost_ema_decay * cost_ema
-            + (1.0 - train_cfg.cost_ema_decay) * cost_sum
-        )
-        if (output.cost_target is not None and step_decisions[-1]
-                and not model_cfg.joint_route.force_fixed):
-            # Solve the common price for the batch just seen instead of letting a
-            # dual variable crawl towards it: with reinvestment tiers available
-            # the controller can overspend faster than slow ascent can answer,
-            # and an unclosed budget voids the whole comparison.
-            price_costs = OrganCosts(model_cfg, train_cfg.sequence_length)
-            # The solver already targets the argmax policy, and training now
-            # *is* the argmax policy, so no correction term is needed.  The
-            # integral term that used to live here was driven by the sampled
-            # cost and therefore pulled the price away from closing the budget
-            # for the policy that actually gets deployed.
-            route_price = solve_batch_price(
-                merge_decisions(step_decisions), price_costs.fixed_share,
-                float(output.cost_target), route_price,
-            )
         step += 1
         tokens_done += train_cfg.tokens_per_step
-        cumulative_cost_sum += cost_sum * train_cfg.tokens_per_step
-        cumulative_cost_tokens += train_cfg.tokens_per_step
-        cumulative_cost = cumulative_cost_sum / max(cumulative_cost_tokens, 1)
-        target_cost = 1.0 if output.cost_target is None else float(output.cost_target)
-        budget_error = cumulative_cost - target_cost
 
         record = {
             "step": step,
@@ -647,19 +578,8 @@ def train(args: argparse.Namespace) -> None:
             "learning_rate": learning_rate,
             "data_position": stream.position,
             "epochs_done": stream.epochs,
-            "joint_analytical_cost": cost_sum,
-            "joint_cost_target": target_cost,
-            "joint_full_policy_cost": output.full_policy_cost,
-            "joint_price": route_price,
-            "joint_price_offset": price_offset,
-            "joint_cost_ema": cost_ema,
-            "joint_cumulative_cost": cumulative_cost,
-            "joint_budget_error": budget_error,
-            "joint_budget_valid": bool(abs(budget_error) <= BUDGET_TOLERANCE),
-            "route_usage": normalised_route_usage(step_route_counts),
-            "route_usage_cumulative": normalised_route_usage(cumulative_route_counts),
-            "ffn_widths": list(model_cfg.joint_route.ffn_width_tiers),
-            "ffn_gradient_l2_by_channel_band": ffn_gradients,
+            "optimizer": train_cfg.optimizer,
+            "ffn_width": model_cfg.dense_intermediate_size,
         }
         with log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record) + "\n")
@@ -682,13 +602,7 @@ def train(args: argparse.Namespace) -> None:
                     run_dir / f"milestone_{tag}_step{step:08d}.pt", model, optimizer,
                     step, tokens_done, stream.position, model_cfg, train_cfg,
                     manifest_hash,
-                    {
-                        "price": route_price, "cost_ema": cost_ema,
-                        "route_mode_counts": cumulative_route_counts,
-                        "cumulative_cost_sum": cumulative_cost_sum,
-                        "cumulative_cost_tokens": cumulative_cost_tokens,
-                        "epochs_done": stream.epochs,
-                    },
+                    {"epochs_done": stream.epochs},
                 )
                 print(f"[milestone] {tag} at {tokens_done:,} tokens", flush=True)
 
@@ -697,15 +611,7 @@ def train(args: argparse.Namespace) -> None:
             save_checkpoint(
                 path, model, optimizer, step, tokens_done, stream.position,
                 model_cfg, train_cfg, manifest_hash,
-                {
-                    "price": route_price,
-                    "cost_ema": cost_ema,
-                    "route_mode_counts": cumulative_route_counts,
-                    "cumulative_cost_sum": cumulative_cost_sum,
-                    "cumulative_cost_tokens": cumulative_cost_tokens,
-                    "epochs_done": stream.epochs,
-                    "price_offset": price_offset,
-                },
+                {"epochs_done": stream.epochs},
             )
             retain_latest(run_dir, train_cfg.keep_latest_checkpoints)
 
@@ -713,32 +619,20 @@ def train(args: argparse.Namespace) -> None:
     save_checkpoint(
         final, model, optimizer, step, tokens_done, stream.position,
         model_cfg, train_cfg, manifest_hash,
-        {
-            "price": route_price,
-            "cost_ema": cost_ema,
-            "route_mode_counts": cumulative_route_counts,
-            "cumulative_cost_sum": cumulative_cost_sum,
-            "cumulative_cost_tokens": cumulative_cost_tokens,
-            "epochs_done": stream.epochs,
-            "price_offset": price_offset,
-        },
+        {"epochs_done": stream.epochs},
     )
     retain_latest(run_dir, train_cfg.keep_latest_checkpoints)
     summary = {
         "tokens_done": tokens_done,
         "steps": step,
-        "cumulative_executed_cost": cumulative_cost_sum / max(cumulative_cost_tokens, 1),
-        "cost_target": target_cost,
-        "budget_tolerance": BUDGET_TOLERANCE,
-        "budget_valid": bool(abs(budget_error) <= BUDGET_TOLERANCE),
-        "final_price": route_price,
-        "cost_ema": cost_ema,
-        "route_usage_cumulative": normalised_route_usage(cumulative_route_counts),
+        "optimizer": train_cfg.optimizer,
+        "epochs_done": stream.epochs,
+        "final_lm_loss": loss_sum,
+        "final_ntp_loss": ntp_sum,
+        "final_mtp_loss": mtp_sum,
     }
     (run_dir / "run_summary.json").write_text(json.dumps(summary, indent=2))
-    verdict = "VALID" if summary["budget_valid"] else "INVALID - compute not matched"
-    print(f"[budget] cumulative executed cost = {summary['cumulative_executed_cost']:.5f} "
-          f"(target {summary['cost_target']}) -> {verdict}", flush=True)
+    print(f"[complete] {tokens_done:,} tokens, {step:,} steps", flush=True)
 
 
 def main() -> None:
@@ -747,13 +641,6 @@ def main() -> None:
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--allow-gpu", action="store_true")
-    parser.add_argument(
-        "--arm", choices=["dense", "base", "adaptive"], default="dense",
-        help="`dense` is the deployed model: no controller, every layer at full "
-             "capacity.  `base` and `adaptive` keep the routing supernet and "
-             "differ only in force_fixed; they exist to reproduce the routed "
-             "comparison, which measured slower than dense on this hardware.",
-    )
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument(
         "--target-tokens", type=int, default=None,
@@ -779,29 +666,17 @@ def main() -> None:
              "repeat it deliberately, or 0 for no limit",
     )
     parser.add_argument(
-        "--optimizer", choices=["adamw", "muon"], default="adamw",
-        help="`muon` puts the 2-D hidden matrices on Muon and everything else "
-             "on an auxiliary AdamW.  Still unvalidated on this model: run the "
-             "short same-init comparison in HANDOFF.md section 6 first",
+        "--optimizer", choices=["adamw", "muon"], default="muon",
+        help="production default `muon` puts 2-D hidden matrices on Muon and "
+             "everything else on an auxiliary AdamW",
     )
     parser.add_argument("--muon-lr", type=float, default=None)
     parser.add_argument(
         "--warmup-fraction", type=float, default=None,
         help="fraction of --schedule-tokens spent warming up.  The 1%% default is "
-             "sized for a full run; a short comparison needs a larger fraction or "
-             "the arms spend most of their steps still ramping",
+             "sized for a full run; a short diagnostic may need a larger value",
     )
     parser.add_argument("--micro-batch", type=int, default=None)
-    parser.add_argument(
-        "--booster-scale", type=float, default=0.1,
-        help="initial scale of the reinvestment bands' output projection",
-    )
-    parser.add_argument(
-        "--init-from", default=None,
-        help="checkpoint (or state-dict .pt) of a Standalone Base whose weights "
-             "are copied into the supernet's Base slice, so the two arms start "
-             "from identical shared weights instead of a shared seed",
-    )
     train(parser.parse_args())
 
 

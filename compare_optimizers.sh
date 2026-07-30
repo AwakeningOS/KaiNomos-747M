@@ -53,7 +53,7 @@ for opt in adamw muon; do
   fi
   echo "=== ${opt}: ${TOKENS} tokens ($(date '+%F %T')) ==="
   "$PY" -m train \
-    --arm dense --optimizer "$opt" --seed 11 \
+    --optimizer "$opt" --seed 11 \
     --micro-batch "$MB" \
     --target-tokens "$TOKENS" \
     --schedule-tokens "$TOKENS" \

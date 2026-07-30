@@ -105,15 +105,7 @@ class DeltaRouter(nn.Module):
         self,
         hidden: torch.Tensor,
         sources: list[torch.Tensor],
-        tier: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if tier is not None:
-            raise ValueError(
-                "Delta Block routing is not under controller control: the "
-                "published mechanism has no tier, gate or source budget, and "
-                "letting a controller prune its sources or scale its output "
-                "would make it a different mechanism"
-            )
         if not sources:
             return hidden
         # Deliberately not `torch.stack(sources)`.  Stacking materialises a second

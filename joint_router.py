@@ -11,13 +11,16 @@ import torch.nn.functional as F
 from config import K3MiniPlusPlusPlusConfig as K3MiniConfig
 from layers import RMSNorm
 
+# No "R" axis.  Depth routing is Delta Block (arXiv:2605.18855), which has no
+# tier, no gate and no source budget; the controller used to own an AttnRes head
+# whose output nothing consumes any more, and a head with no consumer receives no
+# gradient -- dead weight in the parameter count.
 ORGAN_MODES = {
     "K": ("DECAY_ONLY", "FULL"),
     "M": ("BYPASS", "GLOBAL_READ"),
-    # F and R are sized from the config: the FFN tier list is what decides how
-    # many width modes exist, and it now extends above the Base width.
+    # F is sized from the config: the FFN tier list decides how many width modes
+    # exist, and it extends above the Base width.
     "F": None,
-    "R": None,
 }
 
 
@@ -26,7 +29,6 @@ def organ_mode_counts(config) -> dict[str, int]:
         "K": 2,
         "M": 2,
         "F": len(config.joint_route.ffn_width_tiers),
-        "R": len(config.delta.tiers),
     }
 
 
@@ -51,7 +53,11 @@ class RouteDecision:
     # set when every token in the batch chose the same FFN tier, which lets the
     # FFN slice instead of mask and keeps forced-Fixed bit-exact against Base
     ffn_uniform_width: int | None = None
-    attn_res_tier: torch.Tensor | None = None
+    # per-token tier assignment, so the FFN can group tokens by width and run one
+    # matmul per group instead of computing every token at the widest width
+    ffn_tier_index: torch.Tensor | None = None
+    # the selected one-hot entry: exactly 1.0 forward, the router's gradient back
+    ffn_tier_gain: torch.Tensor | None = None
     probs: dict[str, torch.Tensor] = field(default_factory=dict)
     hard_modes: dict[str, torch.Tensor] = field(default_factory=dict)
     expected_variable_cost: torch.Tensor | None = None   # executed modes (ST)
@@ -92,8 +98,7 @@ class JointRouteController(nn.Module):
 
     def reset_to_fixed_policy(self) -> None:
         fixed = {"K": 1, "M": 1,
-                 "F": self.config.joint_route.fixed_ffn_index,
-                 "R": len(self.config.delta.tiers) - 1}
+                 "F": self.config.joint_route.fixed_ffn_index}
         with torch.no_grad():
             for head in self.head.values():
                 head.bias.zero_()
@@ -116,8 +121,7 @@ class JointRouteController(nn.Module):
         adjusted = logits.float() - state.price * costs.float()
         probs = adjusted.softmax(-1)
         fixed = {"K": 1, "M": 1,
-                 "F": self.config.joint_route.fixed_ffn_index,
-                 "R": len(self.config.delta.tiers) - 1}
+                 "F": self.config.joint_route.fixed_ffn_index}
         if state.force_fixed:
             index = torch.full(adjusted.shape[:-1] + (1,), fixed[organ], device=adjusted.device)
             onehot = torch.zeros_like(adjusted).scatter_(-1, index, 1)
@@ -192,7 +196,16 @@ class JointRouteController(nn.Module):
         self, z: torch.Tensor, organ: str, costs: torch.Tensor, state: RouteState,
         layer_index: int, offset: int, memory: dict,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Causal chunk decisions: only each global chunk's first token is read."""
+        """Causal chunk decisions: only each global chunk's first token is read.
+
+        This is a cross-document channel and is not document-masked.  A chunk that
+        spans a boundary takes its decision from a hidden state in the earlier
+        document and applies it to the later one, so editing the earlier document
+        changes how the later one executes -- measured at 6e-08 on the logits of a
+        following document, small but structural.  Nothing deployed is affected:
+        the dense model builds no controller.  Re-enabling routing would require
+        chunk boundaries clipped to document boundaries first.
+        """
         b, t, _ = z.shape
         onehots, probabilities = [], []
         cached = memory.get((layer_index, organ))
@@ -275,6 +288,8 @@ class JointRouteController(nn.Module):
             onehot.to(z.dtype) @ self.ffn_width_masks.to(z.dtype)
         )
         selected = onehot.argmax(-1)
+        decision.ffn_tier_index = selected
+        decision.ffn_tier_gain = onehot.gather(-1, selected.unsqueeze(-1)).squeeze(-1)
         if selected.numel() and bool((selected == selected.reshape(-1)[0]).all()):
             tiers = self.config.joint_route.ffn_width_tiers
             decision.ffn_uniform_width = int(tiers[int(selected.reshape(-1)[0])])
@@ -282,15 +297,6 @@ class JointRouteController(nn.Module):
         decision.hard_modes["F"] = onehot
         charge("F", onehot, probs, unit)
 
-        unit = costs.attn_res(pre_past_blocks, post_past_blocks).to(z.device)
-        onehot, probs = self._token_select(
-            z, "R", unit, state, layer_index, offset
-        )
-        onehot = use("R", onehot)
-        decision.attn_res_tier = onehot.to(z.dtype)
-        decision.probs["R"] = probs
-        decision.hard_modes["R"] = onehot
-        charge("R", onehot, probs, unit)
         decision.expected_variable_cost = torch.stack(charged).sum()
         decision.soft_variable_cost = torch.stack(soft_charged).sum()
         return decision

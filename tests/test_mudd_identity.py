@@ -11,14 +11,48 @@ from mudd_qkv import MuDDQKV
 
 
 def test_identity_initialisation_returns_the_newest_source():
+    """Exactly the newest source -- not a normalised version of it.
+
+    This assertion used to compare against `input_norm(sources[-1])`, which made
+    it pass while the module actually returned `RMSNorm(h)` instead of `h`.  The
+    per-stream norms now live on the layer as a single `attn_norm`, so identity
+    means bit-equality with the newest depth state.
+    """
     torch.manual_seed(5)
     mudd = MuDDQKV(hidden_size=16, num_sources=4, mlp_hidden=8).double()
     sources = [torch.randn(2, 5, 16, dtype=torch.float64) for _ in range(4)]
     out = mudd(sources)
 
-    expected = {name: mudd.input_norm[name](sources[-1]) for name in ("q", "k", "v")}
     for name in ("q", "k", "v"):
-        assert torch.allclose(out[name], expected[name], atol=1e-12), name
+        assert torch.equal(out[name], sources[-1]), name
+
+
+def test_mla_layers_mix_one_kv_stream():
+    """MLA reads a single compressed KV latent, so it gets one KV stream."""
+    from config import MuDDConfig
+
+    mudd = MuDDConfig()
+    assert mudd.streams_for("KDA") == ("q", "k", "v")
+    assert mudd.streams_for("MLA") == ("q", "kv")
+
+    mla = MuDDQKV(hidden_size=8, num_sources=3, mlp_hidden=4,
+                  streams=mudd.streams_for("MLA"))
+    sources = [torch.randn(2, 4, 8) for _ in range(3)]
+    out = mla(sources)
+    assert set(out) == {"q", "kv"}
+
+
+def test_mla_rejects_a_separate_v_input():
+    """The bug this guards: v_input was accepted and silently dropped."""
+    import pytest
+
+    from mla import GatedMLA
+
+    cfg = Config.tiny()
+    attn = GatedMLA(cfg)
+    x = torch.randn(1, 4, cfg.hidden_size)
+    with pytest.raises(ValueError, match="single KV input"):
+        attn(q_input=x, k_input=x, v_input=x)
 
 
 def test_static_bias_selects_only_the_newest_source():
@@ -43,6 +77,13 @@ def test_coefficients_are_not_softmaxed():
 
 
 def test_model_with_identity_mudd_matches_direct_qkv_input():
+    """Turning MUDD on must not move the logits at all.
+
+    Previously this only checked that the per-stream norm weights were ones and
+    that the logits were finite -- it never compared the two paths, so it could
+    not have caught the norm that made MUDD a non-identity.  Now it runs the same
+    weights with and without MUDD and demands equality.
+    """
     from model import K3MiniPlusPlusPlusForCausalLM as Model
 
     torch.manual_seed(7)
@@ -50,14 +91,10 @@ def test_model_with_identity_mudd_matches_direct_qkv_input():
     m = Model(cfg).double().eval()
     ids = torch.randint(0, cfg.vocab_size, (2, 10))
     with torch.no_grad():
-        baseline = m(ids).logits
+        with_mudd = m(ids).logits
+        for layer in m.model.layers:
+            layer.mudd = None            # same weights, MUDD path removed
+        without_mudd = m(ids).logits
 
-    # disabling MUDD entirely must give the same logits at identity init,
-    # because the per-stream RMSNorms are the only remaining difference
-    for layer in m.model.layers:
-        for name in ("q", "k", "v"):
-            assert torch.equal(
-                layer.mudd.input_norm[name].weight,
-                torch.ones_like(layer.mudd.input_norm[name].weight),
-            )
-    assert torch.isfinite(baseline).all()
+    assert torch.isfinite(with_mudd).all()
+    assert torch.equal(with_mudd, without_mudd)

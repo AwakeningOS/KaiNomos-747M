@@ -1,21 +1,36 @@
-"""Projected Low-Rank Delta Block.
+"""Delta Block Attention Residuals.
 
-What is re-used is the *change* each block made, not the accumulated hidden
-state: `delta_b = block_end - block_start`.  Values are kept at full width so a
-re-added delta loses nothing; only the routing key is projected to 64 dims,
-which is where the cost actually is.
+Delta Attention Residuals, Cheng Luo, Zefan Cai, Junjie Hu, arXiv:2605.18855.
+This is the paper's *Delta Block* variant, adopted as published rather than
+invented here.
 
-The result is added to the residual stream, never substituted for it:
+What is routed is the *change* each block made, never the accumulated hidden
+state:
 
-    h_hat = h + tanh(gate) * sum_i alpha_i delta_i
+    delta_b = h_{(b+1)B} - h_{bB}
 
-so with the gate at zero the block is exactly the identity and a checkpoint
-migrated into this model behaves as it did before.  A replacing formulation
-would have no such starting point.
+and the routed result is *added* to the residual stream, never substituted for
+it.  Routing cumulative state is what collapses in deeper layers -- every source
+looks alike once it is dominated by the same accumulated signal -- and replacing
+the stream would make the mechanism a substitute for the residual path rather
+than a contribution to it.
 
-JointRoute chooses how many sources to retrieve (0 / 1 / 2 / ALL); the softmax
-is renormalised over the retained set, so retrieving fewer sources is a real
-restriction rather than a rescaling.
+    sources = [embedding, delta_0, ..., delta_{b-1}, partial_delta]
+    K       = norm(V)
+    logits  = w_l^T RMSNorm(source_i)
+    alpha   = softmax(logits, over sources)
+    routed  = h + sum_i alpha_i * source_i
+
+The embedding is a permanent first source; the partial delta is the change the
+current, still-open block has made so far and is zero immediately after a
+boundary.
+
+Following the paper there is no gate, no temperature and no entropy term.  The
+query is zero-initialised, which means the mechanism does *not* start as the
+identity: at zero logits the softmax is uniform, so the routed value is the mean
+of the sources rather than nothing.  That is deliberate here -- this model is
+pre-trained from scratch, so there is no trained checkpoint whose behaviour an
+identity start would have to preserve.
 """
 
 from __future__ import annotations
@@ -26,104 +41,104 @@ import torch.nn as nn
 from layers import RMSNorm
 
 
-class DeltaBank:
-    """Completed block deltas plus the current partial delta, per forward pass."""
+def _promote(tensor: torch.Tensor) -> torch.Tensor:
+    """To float32 from anything narrower; float64 is left alone."""
+    return tensor if tensor.dtype in (torch.float32, torch.float64) else tensor.float()
 
-    def __init__(self) -> None:
+
+class DeltaBank:
+    """The embedding, the completed block deltas, and the open block's delta."""
+
+    def __init__(self, granularity: str = "block") -> None:
+        if granularity not in ("block", "sublayer"):
+            raise ValueError(f"unknown delta granularity {granularity!r}")
+        self.granularity = granularity
+        self.embedding: torch.Tensor | None = None
         self.completed: list[torch.Tensor] = []
         self.block_start: torch.Tensor | None = None
+        # "sublayer" granularity: every sublayer output is its own source, so the
+        # set grows to 2L rather than L/B.  Kept separate from `completed` because
+        # the two are different quantities and a mode that silently reused the
+        # other's list would look like it worked.
+        self.sublayer: list[torch.Tensor] = []
 
-    def start_block(self, hidden: torch.Tensor) -> None:
-        self.block_start = hidden
+    def start(self, embedding: torch.Tensor) -> None:
+        """Record the embedding as the permanent first source."""
+        self.embedding = embedding
+        self.block_start = embedding
 
     def close_block(self, hidden: torch.Tensor) -> None:
         if self.block_start is None:
-            raise RuntimeError("close_block() without start_block()")
+            raise RuntimeError("close_block() without start()")
         self.completed.append(hidden - self.block_start)
         self.block_start = hidden
 
+    def record_sublayer(self, delta: torch.Tensor) -> None:
+        """A sublayer's own output, i.e. its contribution to the stream."""
+        if self.granularity == "sublayer":
+            self.sublayer.append(delta)
+
     def sources(self, hidden: torch.Tensor) -> list[torch.Tensor]:
-        """Completed deltas plus the delta accumulated so far in this block."""
-        partial = hidden - self.block_start if self.block_start is not None else None
-        out = list(self.completed)
-        if partial is not None:
-            out.append(partial)
-        return out
+        if self.embedding is None or self.block_start is None:
+            raise RuntimeError("sources() before start()")
+        if self.granularity == "sublayer":
+            return [self.embedding, *self.sublayer]
+        return [self.embedding, *self.completed, hidden - self.block_start]
 
 
 class DeltaRouter(nn.Module):
-    """One (layer, sublayer) routing head over the delta bank."""
+    """One depth router, owned by a single (layer, sublayer) position.
 
-    def __init__(self, hidden_size: int, key_rank: int, eps: float = 1e-6):
+    The norm and the query are per sublayer and are never shared between the
+    attention and feed-forward positions of a layer: they are asking different
+    questions of the same sources.
+    """
+
+    def __init__(self, hidden_size: int, eps: float = 1e-6):
         super().__init__()
-        self.key_rank = key_rank
-        self.query = nn.Parameter(torch.zeros(key_rank))
-        # a scalar gate through tanh: exactly zero at init, bounded afterwards
-        self.gate = nn.Parameter(torch.zeros(()))
-        nn.init.normal_(self.query, std=0.02)
+        self.norm = RMSNorm(hidden_size, eps)
+        # `w_l`, zero-initialised as published.  No bias: the paper's query is a
+        # vector, not an affine map.
+        self.query = nn.Parameter(torch.zeros(hidden_size))
 
     def forward(
         self,
         hidden: torch.Tensor,
-        keys: list[torch.Tensor],
-        values: list[torch.Tensor],
+        sources: list[torch.Tensor],
         tier: torch.Tensor | None = None,
-        tiers: tuple[int, ...] = (0, 1, 2, -1),
     ) -> torch.Tensor:
-        if not values:
+        if tier is not None:
+            raise ValueError(
+                "Delta Block routing is not under controller control: the "
+                "published mechanism has no tier, gate or source budget, and "
+                "letting a controller prune its sources or scale its output "
+                "would make it a different mechanism"
+            )
+        if not sources:
             return hidden
-        key = torch.stack(keys, dim=-2).float()            # [B, T, S, R]
-        value = torch.stack(values, dim=-2)                # [B, T, S, H]
-        scores = torch.einsum("btsr,r->bts", key, self.query.float())
-        scores = scores / (self.key_rank ** 0.5)
-
-        if tier is None:
-            weights = scores.softmax(-1)
-        else:
-            weights = self._tiered_softmax(scores, tier.float(), tiers)
-
-        pooled = torch.einsum("bts,btsh->bth", weights.to(value.dtype), value)
-        return hidden + torch.tanh(self.gate).to(hidden.dtype) * pooled
-
-    @staticmethod
-    def _tiered_softmax(
-        scores: torch.Tensor, tier: torch.Tensor, tiers: tuple[int, ...]
-    ) -> torch.Tensor:
-        """Softmax over the top-r sources only, renormalised within that set."""
-        n = scores.shape[-1]
-        order = scores.argsort(dim=-1, descending=True)
-        rank = torch.empty_like(order)
-        rank.scatter_(-1, order,
-                      torch.arange(n, device=scores.device).expand_as(order).contiguous())
-
-        limits = torch.tensor([n if r < 0 else min(r, n) for r in tiers],
-                              device=scores.device, dtype=scores.dtype)
-        keep_per_tier = (rank.unsqueeze(-1) < limits.view(1, 1, 1, -1)).to(scores.dtype)
-        keep = (keep_per_tier * tier.unsqueeze(-2)).sum(-1)
-
-        num = keep * torch.exp(scores - scores.amax(-1, keepdim=True))
-        total = num.sum(-1, keepdim=True)
-        # r = 0 keeps nothing; the router then contributes exactly zero
-        return torch.where(total > 0, num / total.clamp_min(1e-20),
-                           torch.zeros_like(num))
+        # Deliberately not `torch.stack(sources)`.  Stacking materialises a second
+        # full copy of every source as one [B, T, S, H] tensor, and autograd holds
+        # it for the backward pass; at 32 router positions that measured +0.9 GB on
+        # the production config, enough to push it past its VRAM budget.  The
+        # sources already exist as tensors in the graph, so scoring and pooling them
+        # one at a time is the same arithmetic without the copy.
+        # Logits are scored at float32 or better: under bf16 autocast a softmax
+        # over raw bf16 dot products loses resolution between close sources.
+        # Promoting rather than casting keeps a float64 run exact, which is what
+        # makes the double-precision tests worth running.
+        scores = torch.stack(
+            [
+                torch.einsum("bth,h->bt", _promote(self.norm(source)),
+                             _promote(self.query))
+                for source in sources
+            ],
+            dim=-1,
+        )                                                    # [B, T, S]
+        weights = scores.softmax(-1)
+        pooled = hidden
+        for index, source in enumerate(sources):
+            pooled = pooled + weights[..., index, None].to(source.dtype) * source
+        return pooled
 
 
-class DeltaKeyProjection(nn.Module):
-    """Full-width delta value -> low-rank routing key, one per block slot."""
-
-    def __init__(self, hidden_size: int, key_rank: int, num_slots: int, eps: float = 1e-6):
-        super().__init__()
-        self.norm = RMSNorm(hidden_size, eps)
-        self.proj = nn.ModuleList(
-            [nn.Linear(hidden_size, key_rank, bias=False) for _ in range(num_slots)]
-        )
-
-    def forward(self, values: list[torch.Tensor]) -> list[torch.Tensor]:
-        keys = []
-        for index, value in enumerate(values):
-            slot = self.proj[min(index, len(self.proj) - 1)]
-            keys.append(slot(self.norm(value)))
-        return keys
-
-
-__all__ = ["DeltaBank", "DeltaRouter", "DeltaKeyProjection"]
+__all__ = ["DeltaBank", "DeltaRouter"]

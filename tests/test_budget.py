@@ -20,7 +20,9 @@ def test_budget_target_is_the_fixed_policy_cost():
 
 
 def test_pruning_and_reinvestment_both_have_room():
-    cfg = Config()
+    # The routing config, not the deployed one: `Config()` is dense and has a
+    # single tier, so by construction it has neither pruning nor reinvestment room.
+    cfg = Config.tiny()
     costs = OrganCosts(cfg, cfg.context_length_train)
     widest = float(costs.ffn[-1] - costs.ffn[cfg.joint_route.fixed_ffn_index])
     richest = costs.full_policy_cost + widest * cfg.num_hidden_layers
@@ -66,9 +68,9 @@ def test_cheaper_and_richer_policies_move_the_cost_the_right_way():
             return float(m(ids, route_state=RouteState(hard=True)).expected_cost)
 
     fixed_f = cfg.joint_route.fixed_ffn_index
-    baseline = cost_with({"K": 1, "M": 1, "F": fixed_f, "R": 3})
-    cheap = cost_with({"K": 0, "M": 0, "F": 0, "R": 0})
-    rich = cost_with({"K": 1, "M": 1, "F": len(cfg.joint_route.ffn_width_tiers) - 1, "R": 3})
+    baseline = cost_with({"K": 1, "M": 1, "F": fixed_f})
+    cheap = cost_with({"K": 0, "M": 0, "F": 0})
+    rich = cost_with({"K": 1, "M": 1, "F": len(cfg.joint_route.ffn_width_tiers) - 1})
     assert cheap < baseline < rich
 
 

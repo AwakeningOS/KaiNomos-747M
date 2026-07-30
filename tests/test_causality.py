@@ -36,16 +36,16 @@ def test_delta_bank_never_exposes_an_unfinished_future_block():
 
     bank = DeltaBank()
     h0 = torch.randn(1, 3, 8)
-    bank.start_block(h0)
+    bank.start(h0)
     assert len(bank.completed) == 0
-    # before any block closes, the only source is the current partial delta
-    assert len(bank.sources(h0 + 1)) == 1
+    # before any block closes: the embedding and the current partial delta
+    assert len(bank.sources(h0 + 1)) == 2
 
     bank.close_block(h0 + 2)
     assert len(bank.completed) == 1
     assert torch.allclose(bank.completed[0], torch.full_like(h0, 2.0))
-    # a completed block plus the new partial
-    assert len(bank.sources(h0 + 3)) == 2
+    # embedding, the completed block, and the new partial
+    assert len(bank.sources(h0 + 3)) == 3
 
 
 def test_mtp_target_shift_predicts_the_token_after_next():

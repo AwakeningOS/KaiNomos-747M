@@ -7,13 +7,21 @@ small per-layer MLP and are used directly, not softmaxed, matching the reference
 MUDDFormer implementation: a softmax would force the mixes onto a simplex and
 forbid both negative coefficients and amplification.
 
-Only Q, K and V are mixed here.  The residual direction is left to the Delta
-Block, so exactly one mechanism writes to each path.
+Only the attention input streams are mixed here.  The residual direction is left
+to the Delta Block, so exactly one mechanism writes to each path.
 
 At initialisation the static bias selects the newest source and the dynamic MLP
-outputs zero, so `x_q = x_k = x_v = h_l` and the model is bit-identical to one
-without MUDD.  Anything the mixing later does is therefore something training
-chose, not an artefact of turning the module on.
+outputs zero, so every stream returns `h_l` *exactly*.  Normalisation is not done
+here: the layer owns a single `attn_norm`, the same one the 82M model had, and it
+is applied to these mixes by the caller.  An earlier version normalised each
+stream inside this module, which meant the "identity" initialisation actually
+returned `RMSNorm(h)` rather than `h` -- a measured max deviation of 0.45 -- and
+silently replaced the migrated 82M pre-attention norm with three fresh ones.
+
+Stream sets differ by operator, because the operators differ in what they can
+accept: KDA projects Q, K and V independently, while MLA compresses K and V into
+one latent and therefore has exactly one KV input to mix.  Handing MLA a separate
+V stream produced coefficients that received no gradient at all.
 """
 
 from __future__ import annotations
@@ -43,10 +51,6 @@ class MuDDQKV(nn.Module):
         bias = torch.zeros(len(streams), num_sources)
         bias[:, -1] = 1.0
         self.static_bias = nn.Parameter(bias)
-
-        self.input_norm = nn.ModuleDict(
-            {name: RMSNorm(hidden_size, eps) for name in streams}
-        )
         self.reset_to_identity()
 
     def reset_to_identity(self) -> None:
@@ -59,8 +63,9 @@ class MuDDQKV(nn.Module):
     def forward(self, sources: list[torch.Tensor]) -> dict[str, torch.Tensor]:
         """`sources`: depth states usable by this layer, newest last.
 
-        Returns one mixed and normalised tensor per stream.  The caller must
-        never pass a state the layer cannot causally see.
+        Returns one *unnormalised* mix per stream; the caller applies the layer's
+        `attn_norm`.  The caller must never pass a state the layer cannot
+        causally see.
         """
         if len(sources) != self.num_sources:
             raise ValueError(
@@ -74,10 +79,7 @@ class MuDDQKV(nn.Module):
         coef = coef + self.static_bias                # [B, T, streams, S]
 
         mixed = torch.einsum("btcs,btsh->btch", coef.to(stack.dtype), stack)
-        return {
-            name: self.input_norm[name](mixed[..., i, :])
-            for i, name in enumerate(self.streams)
-        }
+        return {name: mixed[..., i, :] for i, name in enumerate(self.streams)}
 
     def coefficient_summary(self, sources: list[torch.Tensor]) -> torch.Tensor:
         """Mean |coefficient| per (stream, source), for the depth-mixing log."""

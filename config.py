@@ -20,20 +20,31 @@ LAYER_PATTERN = (
 
 @dataclass
 class KDAConfig:
-    num_heads: int = 8
+    num_heads: int = 24         # 24 * 64 == hidden_size 1536
     head_dim: int = 64
     short_conv_kernel_size: int = 4
-    decay_rank: int = 32
+    # Must stay at the 82M value.  Narrowing this to 32 made `f_a_proj` and
+    # `f_b_proj` shape-mismatch on migration, so all nine transferable KDA layers
+    # silently threw away their trained decay projections and restarted from a
+    # fresh low-rank map -- 12.4M parameters of learned forgetting behaviour, for
+    # 426k parameters of saving.
+    decay_rank: int = 112
     gate_lower_bound: float = -5.0
     l2_eps: float = 1e-6
     a_log_init: tuple[float, float] = (1.0, 16.0)
+    # Retention at initialisation for a freshly created KDA layer.  dt_bias = 0
+    # gives decay = -5*sigmoid(0) = -2.5, i.e. exp(-2.5) = 0.082: a new layer
+    # forgets 92% of its state every token before it has learned anything.  The
+    # bias is solved from this target instead, so a fresh layer starts by
+    # remembering and learns to forget.
+    init_retention: float = 0.9
 
 
 @dataclass
 class MLAConfig:
-    num_heads: int = 8
-    q_lora_rank: int = 128
-    kv_lora_rank: int = 128
+    num_heads: int = 24         # 24 * v_head_dim 64 == hidden_size 1536
+    q_lora_rank: int = 224
+    kv_lora_rank: int = 224
     qk_nope_head_dim: int = 48
     qk_shared_head_dim: int = 16
     v_head_dim: int = 64
@@ -54,7 +65,14 @@ class MuDDConfig:
 
     enabled: bool = True
     hidden: int = 64            # width of the per-layer coefficient MLP
+    # Stream sets are per operator.  MLA compresses K and V into a single latent
+    # and reads only one KV input, so giving it a separate V stream created
+    # coefficients that no gradient ever reached.
     streams: tuple[str, ...] = ("q", "k", "v")
+    mla_streams: tuple[str, ...] = ("q", "kv")
+
+    def streams_for(self, kind: str) -> tuple[str, ...]:
+        return self.mla_streams if kind == "MLA" else self.streams
 
 
 @dataclass
@@ -66,6 +84,11 @@ class DeltaConfig:
     """
 
     enabled: bool = True
+    # "block": sources are the completed 4-layer block deltas plus the open
+    # block's partial delta -- ~L/B sources.  "sublayer": every sublayer output is
+    # its own source -- 2L sources.  The paper reports sublayer slightly ahead on
+    # perplexity (36.83 vs 37.08 at 220M) and Block 1.24x faster with less memory.
+    granularity: str = "block"
     num_blocks: int = 4         # 16 layers / 4 = one delta per 4-layer block
     key_rank: int = 64
     tiers: tuple[int, ...] = (0, 1, 2, -1)   # -1 == ALL available sources
@@ -78,18 +101,29 @@ class MTPConfig:
     enabled: bool = True
     extra_tokens: int = 1
     loss_weight: float = 0.30
-    ffn_width: int = 1792       # the only knob used to land inside 109-112M
+    ffn_width: int = 6144       # matches the backbone FFN width
 
 
 @dataclass
 class JointRouteConfig:
-    enabled: bool = True
+    # Off by default.  Measured on an RTX 3090 at d_model 512, grouped per-width
+    # FFN dispatch ran *slower* than the dense path it was meant to beat (6 tiers
+    # averaging width 1941: 6.50 ms, against 6.07 ms for a dense 2816 and 3.88 ms
+    # for a dense 1920).  Splitting 6,144 tokens six ways leaves GEMMs too small
+    # for the hardware, so the FLOPs the router saved on paper cost more wall
+    # clock than they returned.  The machinery is kept -- it is correct, and the
+    # arithmetic changes in its favour at larger widths -- but nothing deployed
+    # uses it, and the controller is not built when this is False.
+    enabled: bool = False
     force_fixed: bool = False
     controller_hidden: int = 64
     chunk_size: int = 64
-    # Core 1024 | +384 | +384 | +384 | +256 | +384
-    ffn_width_tiers: tuple[int, ...] = (1024, 1408, 1792, 2176, 2432, 2816)
-    fixed_ffn_width: int = 1792
+    # A single tier: the model is dense.  A tier the policy never selects gets
+    # exactly zero gradient -- the earlier run's log shows `all/1792:2176` and
+    # every band above it at 0.0 from the first step to the last -- so a ladder
+    # is only worth its storage if routing actually visits it.
+    ffn_width_tiers: tuple[int, ...] = (6144,)
+    fixed_ffn_width: int = 6144
     temperature: float = 1.0
     init_policy_bias: float = 4.0
     price: float = 0.0
@@ -105,10 +139,21 @@ class K3MiniPlusPlusPlusConfig:
     # KaiNomos-110M has its own 32,768-piece SentencePiece tokenizer. The
     # source 82M model keeps its original 16,384-piece tokenizer unchanged.
     vocab_size: int = 32768
-    hidden_size: int = 512
+    # 896 with 14 heads of 64, not 512 with 8.  The 82M checkpoint that 512 was
+    # chosen to inherit from turned out to be worth almost nothing -- 100,007,936
+    # tokens on the predecessor's 16,384-piece English BPE, which encoded Japanese
+    # at 2.56 tokens per character -- so there was no reason left to keep the
+    # narrow width.  Measured on an RTX 3090, wide and shallow also runs faster
+    # per parameter than deep and thin: h640/L16 at 155.8M reached 10,075 tok/s
+    # where h512/L24 at 143.2M managed 8,449.
+    hidden_size: int = 1536
     num_hidden_layers: int = 16
     layer_pattern: tuple[str, ...] = LAYER_PATTERN
-    dense_intermediate_size: int = 1792     # the Base policy width
+    dense_intermediate_size: int = 6144
+    # `<|eod|>` in the project tokenizer.  build_pool.py terminates every
+    # document with it and it appears nowhere else, so it is what document
+    # boundaries are derived from at load time.
+    eod_token_id: int = 4
     context_length_train: int = 1024
     rms_norm_eps: float = 1e-6
     attn_res_block_size: int = 4
@@ -188,7 +233,11 @@ class K3MiniPlusPlusPlusConfig:
             mudd=MuDDConfig(hidden=8),
             delta=DeltaConfig(num_blocks=2, key_rank=8),
             mtp=MTPConfig(ffn_width=48),
+            # Routing is *on* here even though the deployed model is dense: this
+            # config is what the routing tests run against, and the machinery has
+            # to stay covered for as long as it stays in the tree.
             joint_route=JointRouteConfig(
+                enabled=True,
                 controller_hidden=16,
                 ffn_width_tiers=(12, 24, 48, 60, 72, 84),
                 fixed_ffn_width=48,

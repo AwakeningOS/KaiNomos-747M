@@ -1,7 +1,27 @@
+# Core
 numpy>=1.26
 torch>=2.4
+
+# Tokenizer.  build_tokenizer.py trains the SentencePiece Unigram model, and
+# migrate_vocab.py needs the predecessor's 16,384-piece BPE to carry embeddings
+# across the vocabulary change, so both are required to reproduce either the
+# pool or the migration.  Neither was listed before, so a clean checkout could
+# not run the data pipeline at all.
+sentencepiece>=0.2
+tokenizers>=0.20
+
+# Kimi Delta Attention Triton kernels.  Without these, kda_impl="auto" falls back
+# to the sequential PyTorch reference without saying so -- measured ~80x slower
+# per KDA layer, which turns GPU training from slow into impossible.
+fla-core>=0.4
+einops>=0.8
+triton>=3.3
+
+# Data pipeline
 datasets>=3.0
 huggingface_hub>=1.0
 boto3>=1.35
 xxhash>=3.4
+
+# Tests
 pytest>=8.0

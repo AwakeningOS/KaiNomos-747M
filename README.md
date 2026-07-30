@@ -29,7 +29,7 @@ distillation, conversion or reduced version of any released model.
 It differs from those systems in every dimension that defines them: 110M dense
 parameters rather than a large mixture of experts, text-only rather than
 multimodal, 1,024-token context rather than 1M, and with mechanisms — MUDD-QKV,
-the Delta Block, adaptive execution routing — that are this project's own.
+MUDD-QKV and adaptive execution routing — that are this project's own.
 
 `THIRD_PARTY_NOTICES.md` records the provenance of every mechanism, dependency
 and dataset, and which parts came from a paper, from external code, or from here.
@@ -51,10 +51,21 @@ mixture of *every* past layer output, not just the one below it. Initialised to
 select the newest state, so it starts as a no-op and any mixing is learned rather
 than imposed.
 
-**Projected Low-Rank Delta Block.** Re-uses the *change* each 4-layer block made
-rather than the accumulated state. Values stay at full width; only the
-64-dimensional routing key is projected. The gate starts at zero, so the block
-begins as exactly the identity.
+**Delta Block Attention Residuals** (Delta Attention Residuals,
+arXiv:2605.18855, adopted as published). Depth routing reads the *change* each
+4-layer block made — plus the embedding and the change the open block has made so
+far — never the accumulated hidden state, which is what collapses in deeper layers
+once every source is dominated by the same accumulated signal. The routed value is
+*added* to the sublayer input; the residual stream is always updated as
+`h = h + sublayer_output`, so the routed delta is never carried forward and
+double-counted.
+
+The paper's per-sublayer variant is slightly ahead on perplexity (36.83 vs 37.08
+at 220M) and is implemented here as `delta.granularity = "sublayer"`, but it is
+not used: at this model's size it needs 2L = 32 sources instead of 6, which runs
+out of memory at micro-batch 2 and halves throughput at micro-batch 1 (902 vs
+1,790 tok/s, 205 days instead of 104 for 16B tokens). The Block variant is the
+production setting.
 
 **MTP-1.** An auxiliary head predicts the token *after* next, from the hidden
 state plus the next token's embedding, at loss weight 0.30. Training only — it

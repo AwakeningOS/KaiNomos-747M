@@ -37,11 +37,22 @@ class MTPHead(nn.Module):
         self.ffn_norm = RMSNorm(h, eps)
         self.ffn = SiTUMLP(h, config.mtp.ffn_width)
 
-    def forward(self, hidden: torch.Tensor, next_embeddings: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden: torch.Tensor, next_embeddings: torch.Tensor,
+                segments: torch.Tensor | None = None) -> torch.Tensor:
         z = self.fuse(torch.cat(
             [self.hidden_norm(hidden), self.token_norm(next_embeddings)], dim=-1
         ))
-        attn_out, _ = self.attn(self.attn_norm(z))
+        # The auxiliary block is recurrent too, so it needs the same document
+        # boundaries the body used, re-derived from the sliced segment ids.
+        offsets = None
+        if segments is not None:
+            from segments import cu_seqlens
+            starts = torch.zeros_like(segments, dtype=torch.bool)
+            starts[:, 1:] = segments[:, 1:] != segments[:, :-1]
+            starts[:, 0] = True
+            offsets = cu_seqlens(starts)
+        attn_out, _ = self.attn(self.attn_norm(z), segments=segments,
+                                seq_offsets=offsets)
         z = z + attn_out
         return z + self.ffn(self.ffn_norm(z))
 

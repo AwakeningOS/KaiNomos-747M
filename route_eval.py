@@ -25,7 +25,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from joint_router import RouteState
+from joint_router import RouteDecision, RouteState
 
 
 def permute_routes(
@@ -67,7 +67,9 @@ def evaluate_nll_and_cost(
     permute: bool = False,
     seed: int = 0,
     collect_routes: bool = False,
+    price: float = 0.0,
 ) -> dict:
+    """`price` must be the price the checkpoint was trained under; see eval.py."""
     model.eval()
     wins = _windows(bin_path, seq_len, max_tokens)
     gen = torch.Generator(device=device).manual_seed(seed) if permute else None
@@ -79,14 +81,14 @@ def evaluate_nll_and_cost(
         batch = torch.from_numpy(wins[i:i + batch_size]).to(device)
         ids, tgt = batch[:, :-1], batch[:, 1:]
 
-        state = RouteState(hard=True) if routed else None
+        state = RouteState(price=price, hard=True) if routed else None
         if routed and (permute or collect_routes):
             with torch.autocast(device_type=device, dtype=dtype, enabled=device != "cpu"):
-                probe = model(ids, route_state=RouteState(hard=True))
+                probe = model(ids, route_state=RouteState(price=price, hard=True))
             per_layer = [d.hard_modes for d in probe.joint_decisions]
             if permute:
                 per_layer = permute_routes(per_layer, gen)
-                state = RouteState(hard=True, route_override=per_layer)
+                state = RouteState(price=price, hard=True, route_override=per_layer)
             if collect_routes:
                 records.append({f"L{li:02d}_{o}": oh.argmax(-1).to(torch.int8).cpu().numpy()
                                 for li, layer in enumerate(per_layer)
@@ -110,6 +112,7 @@ def evaluate_nll_and_cost(
         "perplexity": float(np.exp(min(nll, 20.0))),
         "executed_cost_over_fixed": float(np.mean(costs)),
         "executed_cost_std": float(np.std(costs)),
+        "route_price": price,
         "eval_tokens": total_tokens,
         "windows": int(len(wins)),
     }
@@ -147,6 +150,40 @@ __all__ = ["permute_routes", "evaluate_nll_and_cost", "save_routes_npz", "route_
 # --------------------------------------------------------------------------
 # batch price solving
 # --------------------------------------------------------------------------
+
+def merge_decisions(decision_batches: list[list[RouteDecision]]) -> list[RouteDecision]:
+    """Join per-forward decisions along the sample axis, one entry per layer.
+
+    A training step is several gradient-accumulation micro-batches, but the price
+    used to be solved from the *last* one alone -- one tenth of the step at
+    mb=6 -- so the price that governed the next step was fitted to a tenth of the
+    evidence.  Concatenating is not the same as passing the lists end to end:
+    `_cost_at_price` sums one contribution per decision, so 10 micro-batches of 16
+    layers appended together would be charged as 160 layers.  The sample axis is
+    what has to grow, which is what this does.
+
+    Probabilities are detached: they are read as values by the solver, and keeping
+    them attached would hold ten backward graphs alive at once.
+    """
+    if not decision_batches:
+        return []
+    depth = len(decision_batches[0])
+    if any(len(batch) != depth for batch in decision_batches):
+        raise ValueError("every accumulation micro-batch must decide at every layer")
+    merged = []
+    for index in range(depth):
+        first = decision_batches[0][index]
+        joined = RouteDecision()
+        for organ, probs in first.probs.items():
+            joined.probs[organ] = torch.cat(
+                [batch[index].probs[organ].detach() for batch in decision_batches], dim=0
+            )
+            # Unit costs depend only on the config and the context length, so they
+            # are identical across micro-batches.
+            joined.unit_costs[organ] = first.unit_costs[organ]
+        merged.append(joined)
+    return merged
+
 
 def _cost_at_price(decisions, fixed_share: float, price_used: float, price: float) -> float:
     """Executed cost the controller would have spent at `price`.
@@ -195,4 +232,4 @@ def solve_batch_price(
     return 0.5 * (lo + hi)
 
 
-__all__ += ["solve_batch_price"]
+__all__ += ["solve_batch_price", "merge_decisions"]

@@ -48,14 +48,18 @@ class OrganCosts:
                 h, config.delta.key_rank, delta_sources
             )
             unavoidable += 4.0 * h
-            # MUDD-QKV is always on for both arms: the coefficient MLP plus the
-            # three mixes over the layer outputs this layer can see.
+            # MUDD is always on for both arms: the coefficient MLP plus one mix
+            # per stream over the layer outputs this layer can see.  KDA mixes
+            # three streams, MLA two, so the count is per operator.
+            streams = len(config.mudd.streams_for(kind))
             unavoidable += float(h * config.mudd.hidden
-                                 + config.mudd.hidden * 3 * mudd_sources
-                                 + 3 * mudd_sources * h)
+                                 + config.mudd.hidden * streams * mudd_sources
+                                 + streams * mudd_sources * h)
             variable_full += kda_extra if kind == "KDA" else mla_read
             variable_full += ffn_costs[config.joint_route.fixed_ffn_index]
-            variable_full += 2.0 * self._delta_values(h, delta_sources)
+            # The delta value read is unconditional now: Delta Block always reads
+            # every source, so it is a fixed cost rather than a routed one.
+            unavoidable += 2.0 * self._delta_values(h, delta_sources + 1)
 
         self.normalizer = unavoidable + variable_full
         controller = self._controller_cost(config) * config.num_hidden_layers
@@ -133,7 +137,6 @@ class OrganCosts:
         for index in range(config.num_hidden_layers):
             sources = index // config.block_size + 1
             total += float(self.ffn[0])
-            total += float(self.attn_res(sources, sources)[0])
         return total
 
 

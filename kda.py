@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import torch
@@ -36,10 +37,20 @@ class CausalDepthwiseConv1d(nn.Module):
         with torch.no_grad():
             self.weight[:, 0, -1] = 1.0
 
-    def forward(self, x: torch.Tensor, state: torch.Tensor | None = None):
+    def forward(self, x: torch.Tensor, state: torch.Tensor | None = None,
+                segments: torch.Tensor | None = None):
         b, _, c = x.shape
-        xt = x.transpose(1, 2)
         pad = self.kernel_size - 1
+        if segments is not None:
+            if state is not None:
+                raise ValueError(
+                    "segment-aware convolution has no cached-window form: the "
+                    "cache would have to carry the segment id of each cached "
+                    "position for the mask to stay correct"
+                )
+            from segments import masked_lagged_sum
+            return masked_lagged_sum(x, self.weight, segments), x[:, -pad:].transpose(1, 2)
+        xt = x.transpose(1, 2)
         left = xt.new_zeros(b, c, pad) if state is None else state.to(xt.dtype)
         full = torch.cat([left, xt], dim=-1)
         y = F.conv1d(full, self.weight, groups=c)
@@ -67,8 +78,14 @@ def recurrent_kda(
     beta: torch.Tensor,
     initial_state: torch.Tensor | None = None,
     full_mask: torch.Tensor | None = None,
+    starts: torch.Tensor | None = None,
 ):
-    """Float32 decay-first delta-rule reference."""
+    """Float32 decay-first delta-rule reference.
+
+    `starts` marks the first position of each document; the state is cleared
+    there, which is what `cu_seqlens` makes the Triton kernel do.  Without it the
+    previous document's state is the new document's initial condition.
+    """
     b, t, h, d = q.shape
     state = q.new_zeros(b, h, d, v.shape[-1], dtype=torch.float32)
     if initial_state is not None:
@@ -76,6 +93,8 @@ def recurrent_kda(
     out = q.new_zeros(b, t, h, v.shape[-1], dtype=torch.float32)
     q32, k32, v32 = q.float(), k.float(), v.float()
     for pos in range(t):
+        if starts is not None:
+            state = state * (~starts[:, pos]).to(state.dtype).view(b, 1, 1, 1)
         state = state * log_decay[:, pos].exp().unsqueeze(-1)
         key = k32[:, pos]
         predicted = (key.unsqueeze(-1) * state).sum(-2)
@@ -116,21 +135,51 @@ class KDAttention(nn.Module):
         self.f_a_proj = nn.Linear(self.hidden_size, cfg.decay_rank, bias=False)
         self.f_b_proj = nn.Linear(cfg.decay_rank, self.inner, bias=False)
         self.A_log = nn.Parameter(torch.log(torch.empty(self.num_heads).uniform_(*cfg.a_log_init)))
-        self.dt_bias = nn.Parameter(torch.zeros(self.inner))
+        self.dt_bias = nn.Parameter(self._retention_bias(cfg))
         self.beta_proj = nn.Linear(self.hidden_size, self.num_heads, bias=False)
         self.output_gate = nn.Linear(self.hidden_size, self.inner, bias=False)
         self.output_norm = RMSNorm(self.head_dim, config.rms_norm_eps)
         self.output_proj = nn.Linear(self.inner, self.hidden_size, bias=False)
 
+    def _retention_bias(self, cfg) -> torch.Tensor:
+        """Solve `dt_bias` so a fresh layer starts at `cfg.init_retention`/token.
+
+        The decay is `g = lower_bound * sigmoid(exp(A_log) * (raw + dt_bias))` and
+        the state is multiplied by `exp(g)` each step.  With `dt_bias = 0` and
+        `raw ~ 0` that is `exp(-5 * 0.5) = 0.082`, so an untrained layer discards
+        92% of its recurrent state every token -- it cannot carry information far
+        enough to learn that carrying it was useful.  Inverting the expression at
+        `raw = 0` for the wanted retention gives a bias that starts the layer near
+        the identity in time and lets training introduce forgetting.
+        """
+        retention = float(cfg.init_retention)
+        if not 0.0 < retention < 1.0:
+            raise ValueError("kda.init_retention must lie strictly between 0 and 1")
+        # sigmoid(z) = ln(retention) / lower_bound, then z = logit(that)
+        target = math.log(retention) / cfg.gate_lower_bound
+        if not 0.0 < target < 1.0:
+            raise ValueError(
+                "kda.init_retention is unreachable for this gate_lower_bound"
+            )
+        z = math.log(target / (1.0 - target))
+        # exp(A_log) is per head; dt_bias is per channel, so broadcast the head
+        # scale across that head's channels.
+        scale = self.A_log.detach().exp().view(self.num_heads, 1)
+        bias = (z / scale).expand(self.num_heads, self.head_dim)
+        return bias.reshape(-1).contiguous()
+
     def _project(self, x: torch.Tensor, cache: KDACache | None,
-                 q_src=None, k_src=None, v_src=None):
+                 q_src=None, k_src=None, v_src=None, segments=None):
         """MUDD supplies a separate source per stream; otherwise all three are x."""
         q_src = x if q_src is None else q_src
         k_src = x if k_src is None else k_src
         v_src = x if v_src is None else v_src
-        q, qs = self.q_conv(self.q_proj(q_src), None if cache is None else cache.q_conv_state)
-        k, ks = self.k_conv(self.k_proj(k_src), None if cache is None else cache.k_conv_state)
-        v, vs = self.v_conv(self.v_proj(v_src), None if cache is None else cache.v_conv_state)
+        q, qs = self.q_conv(self.q_proj(q_src),
+                            None if cache is None else cache.q_conv_state, segments)
+        k, ks = self.k_conv(self.k_proj(k_src),
+                            None if cache is None else cache.k_conv_state, segments)
+        v, vs = self.v_conv(self.v_proj(v_src),
+                            None if cache is None else cache.v_conv_state, segments)
         shape = (*x.shape[:2], self.num_heads, self.head_dim)
         return (
             F.silu(q).view(shape),
@@ -147,12 +196,16 @@ class KDAttention(nn.Module):
         self, x: torch.Tensor | None = None, cache: KDACache | None = None,
         use_cache: bool = False, full_mask: torch.Tensor | None = None,
         q_input=None, k_input=None, v_input=None,
+        segments: torch.Tensor | None = None,
+        seq_offsets: torch.Tensor | None = None,
     ):
         # The gates, decay and output gate read the *query* stream: they describe
         # what this position is asking for, which is the same role Q plays.
         if x is None:
             x = q_input
-        q, k, v, conv_states = self._project(x, cache, q_input, k_input, v_input)
+        q, k, v, conv_states = self._project(
+            x, cache, q_input, k_input, v_input, segments
+        )
         raw_decay = self._raw_decay(x)
         beta_logits = self.beta_proj(x).float()
         initial = None if cache is None else cache.recurrent_state
@@ -177,7 +230,29 @@ class KDAttention(nn.Module):
             decay = lower_bounded_log_decay(
                 raw_decay, self.A_log, self.dt_bias, self.cfg.gate_lower_bound
             )
-            out, state = recurrent_kda(qn, kn, v, decay, beta, initial)
+            starts = None
+            if segments is not None:
+                starts = torch.zeros_like(segments, dtype=torch.bool)
+                starts[:, 1:] = segments[:, 1:] != segments[:, :-1]
+                starts[:, 0] = True
+            out, state = recurrent_kda(qn, kn, v, decay, beta, initial, starts=starts)
+        elif seq_offsets is not None:
+            # Variable-length form: the kernel keeps one recurrent state per
+            # segment, so a document never inherits the previous one's state.  It
+            # requires the batch flattened to a single row, which is why the
+            # offsets index the flattened axis.
+            rows = x.shape[0]
+            flat = [t.reshape(1, -1, *t.shape[2:]) for t in (q, k, v, raw_decay, beta)]
+            out, state = chunk_kda(
+                q=flat[0], k=flat[1], v=flat[2], g=flat[3], beta=flat[4],
+                A_log=self.A_log, dt_bias=self.dt_bias,
+                initial_state=initial, output_final_state=True,
+                use_qk_l2norm_in_kernel=True, use_gate_in_kernel=True,
+                use_beta_sigmoid_in_kernel=False, safe_gate=True,
+                lower_bound=self.cfg.gate_lower_bound, scale=1.0,
+                cu_seqlens=seq_offsets,
+            )
+            out = out.reshape(rows, -1, *out.shape[2:])
         elif x.shape[1] == 1:
             out, state = fused_recurrent_kda(
                 q=q, k=k, v=v, g=raw_decay, beta=beta,

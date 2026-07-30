@@ -1,113 +1,121 @@
-# KaiNomos-110M
+# KaiNomos-747M
 
 > **Reforming the laws of compute allocation.**
 > 計算資源配分の法則を作り変える。
 
-A 110M-parameter research language model built to answer one question:
+KaiNomos-747M is a Japanese-centred, decoder-only research language model
+designed for full pre-training on a single 24 GB consumer GPU.
 
-> Given a fixed compute budget, does deciding *per token and per layer* how much
-> of that budget to spend beat spending it uniformly?
+The production design is a **747,368,168-parameter dense model**, selected from
+implementation audits and measurements on the target GPU.
 
-Two arms are trained on identical data, from identical weights, for an identical
-number of tokens, at an identical average analytical FLOPs budget. They differ in
-one thing only.
+> **Status: implementation and smoke tests are complete; full pre-training has
+> not started. No trained weights are published yet.**
 
-| Arm | Behaviour |
-|---|---|
-| **Base** | every layer runs at its standard capacity |
-| **Adaptive** | a shared controller varies each layer's capacity per token, under the same average budget |
+## Current design
 
-The verdict is a single number: **validation and test NLL at equal compute.**
+| Field | Production value |
+| --- | ---: |
+| Total training parameters | 747,368,168 |
+| Inference backbone, excluding MTP | 702,134,416 |
+| MTP training head | 45,233,752 |
+| Layers | 16 |
+| Hidden size | 1,536 |
+| Attention heads | 24 × 64 |
+| Layer pattern | 12 KDA + 4 Gated MLA (`KKKM` × 4) |
+| Dense FFN width | 6,144 |
+| Vocabulary | 49,152, tied embedding / LM head |
+| Training context | 1,024 tokens |
+| Optimizer | Muon for matrix parameters, AdamW for the remaining parameters |
+| Target hardware | NVIDIA RTX 3090 24 GB |
 
-## Attribution
-
-This is an **independent small-scale research implementation inspired by selected
-mechanisms published in the Kimi K3 and Kimi Linear reports.** It is not
-affiliated with, endorsed by, or derived from Moonshot AI, and it is not a
-distillation, conversion or reduced version of any released model.
-
-It differs from those systems in every dimension that defines them: 110M dense
-parameters rather than a large mixture of experts, text-only rather than
-multimodal, 1,024-token context rather than 1M, and with mechanisms — MUDD-QKV,
-the Delta Block, adaptive execution routing — that are this project's own.
-
-`THIRD_PARTY_NOTICES.md` records the provenance of every mechanism, dependency
-and dataset, and which parts came from a paper, from external code, or from here.
+The machine-readable configuration is
+[`kainomos-747m-architecture.json`](kainomos-747m-architecture.json).
 
 ## Architecture
 
-16 layers, d_model 512, `KKKM` × 4 — 12 recurrent-memory layers and 4
-latent-attention layers. **No layer is ever skipped.** Routing varies capacity
-*inside* a layer, so even an easy token keeps updating its representation all the
-way to the last layer.
+**Dense execution.** Every layer and the full 6,144-wide FFN execute for every
+token.
 
-**Nested dense FFN.** One SiTU-GLU matrix used at a prefix width chosen per
-token: 1024 / 1408 / 1792 / 2176 / 2432 / 2816. 1792 is the standard capacity;
-the narrower tiers prune and the wider tiers are funded by that pruning, so the
-average holds.
+**KDA and Gated MLA.** The 16-layer body repeats three Kimi Delta Attention
+layers followed by one NoPE Gated Multi-head Latent Attention layer. MLA uses
+QK normalization over each complete 64-dimensional query/key head.
 
-**MUDD-QKV.** Each layer builds its Query, Key and Value inputs as a learned
-mixture of *every* past layer output, not just the one below it. Initialised to
-select the newest state, so it starts as a no-op and any mixing is learned rather
-than imposed.
+**MUDD-QKV.** Attention inputs are learned mixtures of visible depth states.
+KDA has separate Q, K and V streams; MLA has Q and shared-KV streams.
 
-**Projected Low-Rank Delta Block.** Re-uses the *change* each 4-layer block made
-rather than the accumulated state. Values stay at full width; only the
-64-dimensional routing key is projected. The gate starts at zero, so the block
-begins as exactly the identity.
+**Delta Block Attention Residuals.** Each four-layer block exposes its change,
+rather than another accumulated hidden state, as a retrieval source for later
+sublayers. The production model uses block granularity; the per-sublayer
+variant does not fit the selected micro-batch on the target GPU.
 
-**MTP-1.** An auxiliary head predicts the token *after* next, from the hidden
-state plus the next token's embedding, at loss weight 0.30. Training only — it
-can be dropped at inference.
+**MTP-1.** A training-only auxiliary head predicts one additional future token
+with loss weight 0.30. It is excluded from the inference backbone.
 
-**Adaptive routing.** One shared controller, one common price, four axes
-(recurrent update, latent read, FFN width, delta retrieval). The price is solved
-per batch so that the executed cost equals the Base cost, and training selects by
-the same rule that inference uses — otherwise the policy that is measured is not
-the policy that was trained.
+**Document isolation.** Packed documents are separated with `<|eod|>` token ID
+4. MLA attention, KDA recurrent state, short convolution, next-token loss and
+MTP loss all respect those boundaries so adjacent packed documents cannot leak
+context into one another.
 
-| | |
-|---|---|
-| Total parameters | 111,042,670 |
-| Inference (excluding MTP) | 106,409,510 |
-| Controller | 39,694 (0.036%) |
+## Training data and plan
 
-## Training data
+Training uses **DoubleDragon-DataMix-v2**, with a dedicated 49,152-piece
+SentencePiece Unigram tokenizer. The registered base mix contains at least
+16 billion unique tokens; up to 1 billion additional post-deduplication tokens
+may be retained when source quality and domain headroom permit it.
 
-`KaiNomos-DataMix-v1` — a fixed-ratio pool of 1,988,270,624 tokens built
-for this model. The ratios below are exact; the pool stops where the scarcest
-source runs out rather than drifting off the mixture to reach a round number.
+The data pipeline performs:
 
-| Share | Source |
-|---|---|
-| 35% | Japanese organic web |
-| 20% | Japanese paraphrase |
-| 10% | Japanese document-grounded instruction |
-| 10% | Japanese Wikipedia reference |
-| 10% | English educational web |
-| 10% | Educational code, permissively licensed only |
-| 5% | Mathematics and reasoning |
+1. immutable validation/test split selection;
+2. exact and cross-source MinHash deduplication;
+3. benchmark-contamination filtering;
+4. fixed-ratio source selection;
+5. deterministic document-aware shuffling and token packing; and
+6. full EOD and artifact-hash verification.
 
-Ratios are defined over tokens *in this project's tokenizer*: a corpus counted
-with someone else's tokenizer says nothing about how much of it this model will
-actually read.
+Full pre-training is planned as one dense Muon run. Checkpoints are resumable,
+and weight-only observation snapshots are scheduled at logarithmic token
+milestones to record how the model changes during training.
 
-A dedicated 32,768-piece SentencePiece Unigram tokenizer is trained on the same
-mixture. The predecessor's 16,384-piece English BPE encoded Japanese at 2.56
-tokens per character — decomposing it into raw UTF-8 bytes — which would have
-spent most of the training budget re-deriving the character encoding.
+Raw training corpora and unpublished checkpoints are not stored in this source
+repository.
 
-## Status
+## Validation
 
-Implementation complete and tested; full training pending.
+The source includes CPU invariance tests and GPU checks for:
+
+- causal forward and backward behavior;
+- KDA/MLA tensor shapes and finite gradients;
+- document-boundary isolation;
+- MUDD and Delta initialization behavior;
+- Muon parameter grouping and checkpoint resume;
+- dense execution accounting; and
+- observation-snapshot generation.
+
+Run the suite with an environment containing the dependencies in
+`requirements.txt`:
 
 ```bash
-python -m pytest tests/ -q      # 28 tests
-python gpu_smoke.py             # forward, backward, step, eval, save, reload
+PYTHONPATH=. python -m pytest tests/ -q
 ```
 
-## Licence and use
+These checks establish implementation consistency, not model quality. No
+validation NLL, benchmark score, safety evaluation or generation-quality claim
+will be published until trained checkpoints exist.
 
-Research code. Before any commercial use or public model release, consult a
-qualified IP professional; this repository makes no warranty of patent or
-trademark clearance.
+## Attribution
+
+This is an independent research implementation inspired by selected mechanisms
+described in the Kimi K3, Kimi Linear, Muon and Delta Attention Residuals
+reports. It is not affiliated with, endorsed by, or derived from Moonshot AI,
+and it is not a conversion, distillation or reduced release of another model.
+
+See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for mechanism,
+dependency and dataset provenance.
+
+## License
+
+Original source code is released under the Apache License 2.0. Third-party
+datasets, papers, kernels, trademarks and future model artifacts remain subject
+to their own terms. The current repository is for research and reproducibility;
+it does not contain a trained model suitable for production use.

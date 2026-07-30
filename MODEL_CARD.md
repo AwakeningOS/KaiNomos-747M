@@ -6,207 +6,131 @@ tags:
   - architecture-preview
   - consumer-gpu
   - language-model
+  - japanese
   - kda
   - mla
+  - muon
 ---
 
-# KaiNomos-110M
+# KaiNomos-747M
 
-> **Architecture preview — not a pretrained model yet.**
+> **Untrained architecture preview.**
 >
-> No trained weights or tokenizer are currently published in this repository.
-> This page documents a tested 111M-parameter implementation and a
-> pre-registered Base-versus-Adaptive experiment. It is not ready for inference.
+> No trained weights or tokenizer are currently published in this model
+> repository. It cannot yet generate meaningful text.
 
-KaiNomos-110M asks whether selected architecture ideas from frontier-scale
-language models remain useful when reduced to a model that an individual can
-train on a single consumer GPU.
+KaiNomos-747M is a Japanese-centred, decoder-only research language model
+designed for full pre-training on a single NVIDIA RTX 3090 24 GB GPU.
 
-- **Source and tests:** [AwakeningOS/KaiNomos-110M on GitHub](https://github.com/AwakeningOS/KaiNomos-110M)
-- **Reference architecture:** [Kimi K3 technical report](https://arxiv.org/abs/2607.24653)
-- **KDA reference:** [Kimi Linear](https://arxiv.org/abs/2510.26692)
-- **Status:** implementation tested; full pre-training pending
-
-This is an independent, text-only, dense research implementation. It is not an
-official Moonshot AI project, a conversion of Kimi K3 weights, or a reproduction
-of Kimi K3's capabilities.
+- **Source:** [AwakeningOS/KaiNomos-747M on GitHub](https://github.com/AwakeningOS/KaiNomos-747M)
+- **Status:** implementation tested; data preparation and hardware validation in progress
 
 ## Model details
 
 | Field | Value |
 | --- | --- |
 | Architecture | Decoder-only causal language model |
-| Total training parameters | 111,042,670 |
-| Inference backbone, excluding MTP | 106,409,510 |
+| Total training parameters | 747,368,168 |
+| Inference backbone, excluding MTP | 702,134,416 |
+| Training-only MTP head | 45,233,752 |
 | Layers | 16 |
 | Layer pattern | 12 KDA + 4 Gated MLA, repeating 3:1 |
-| Hidden size | 512 |
-| Attention heads | 8 |
-| Vocabulary size | 32,768 (KaiNomos-110M-specific SentencePiece Unigram) |
+| Hidden size | 1,536 |
+| Attention heads | 24 |
+| Head dimension | 64 |
+| Dense FFN width | 6,144 |
+| Vocabulary size | 49,152 |
 | Embedding / LM head | Weight tied |
 | Training context | 1,024 tokens |
-| FFN | SiTU-GLU with nested routed widths |
+| Document boundary token | `<|eod|>` ID 4 |
 | Modalities | Text only |
 | Framework | Custom PyTorch research implementation |
-| License for original code | Apache-2.0 |
+| Optimizer plan | Muon + AdamW parameter groups |
+| Original-code license | Apache-2.0 |
 
-The public architecture configuration is available in
-[`kainomos-110m-architecture.json`](kainomos-110m-architecture.json).
+The public machine-readable configuration is
+[`kainomos-747m-architecture.json`](kainomos-747m-architecture.json).
 
-## Architecture
+## Architecture summary
 
-The K3-inspired core uses:
+- Kimi Delta Attention and NoPE Gated MLA in a `KKKM` × 4 pattern;
+- full-head QK normalization in MLA;
+- MUDD depth mixtures for Q/K/V or Q/KV attention inputs;
+- block-granularity Delta Attention Residual retrieval;
+- a dense 6,144-wide SiTU-GLU FFN in every layer;
+- a training-only MTP-1 auxiliary head; and
+- strict packed-document isolation across attention, recurrent state,
+  convolution and loss.
 
-- Kimi Delta Attention with smooth lower-bounded decay;
-- NoPE Gated Multi-head Latent Attention;
-- a repeating three-KDA/one-MLA layer pattern; and
-- SiTU-GLU feed-forward layers.
-
-The experiment adds:
-
-- **MUDD-QKV:** separate dynamic depth mixtures for Q, K, and V inputs;
-- **Projected Low-Rank Delta Blocks:** route accumulated block deltas into
-  attention and FFN inputs;
-- **JointRoute:** jointly select KDA update mode, MLA read mode, nested FFN
-  width, and delta-source tier under one compute price;
-- **Compute reinvestment:** allow saved compute to fund FFN widths above the
-  fixed Base width; and
-- **MTP-1:** an auxiliary one-future-token training objective.
-
-These mechanisms are hypotheses. They are not presented as improvements until
-the controlled experiment is complete.
-
-## Registered comparison
-
-Both arms use the same supernet and initialization.
-
-| Arm | Policy |
-| --- | --- |
-| **Base** | Fixed full KDA updates, global MLA reads, FFN width 1,792, and all available delta sources |
-| **Adaptive** | Learned input-dependent capacity routing under a matched-compute constraint |
-
-The comparison is intended to hold the following constant:
-
-- initialization;
-- tokenizer and dataset manifest;
-- training tokens;
-- optimizer and schedule;
-- seed;
-- supernet parameters; and
-- cumulative executed analytical compute.
-
-Final claims require held-out evaluation and a compute-budget error within the
-registered tolerance.
-
-## Current validation
-
-The source repository currently records 28 passing tests covering:
-
-- causal behavior;
-- finite forward, loss, gradient, and backward paths;
-- parameter-budget and tensor-shape checks;
-- execution of all 16 layers;
-- nested FFN tiers;
-- compute accounting;
-- identity initialization for added mechanisms;
-- checkpoint migration; and
-- fixed-policy and checkpoint-reload invariants.
-
-A short development smoke run recorded:
-
-| Measurement | Observed |
-| --- | ---: |
-| Sequence length | 1,024 |
-| Micro-batch | 2 |
-| Gradient accumulation | 32 |
-| Peak allocated VRAM | 7.72 GB |
-| Throughput | 3,571 tokens/s |
-| Optimizer-step time | 18.353 s |
-| Checkpoint reload | passed |
-
-The hardware identifier was not stored in the smoke-test JSON. These values are
-implementation diagnostics, not a quality benchmark.
+The production model trains one dense configuration.
 
 ## Training data
 
-Training uses `KaiNomos-DataMix-v1`, a fixed-ratio
-Japanese/English/code/math pool containing exactly **1,988,270,624 tokens** in
-the KaiNomos tokenizer. Its train, validation, and test counts, source
-revisions, tokenizer hash, split seed, document counts, filters, and artifact
-hashes are recorded in `data/pool/manifest.json`.
+The planned corpus is **DoubleDragon-DataMix-v2**, using a dedicated
+49,152-piece SentencePiece Unigram tokenizer. Its registered fixed base mix
+contains at least 16 billion unique tokens, with up to 1 billion additional
+post-deduplication tokens retained only where quality and domain availability
+permit.
+
+The final release will record exact source revisions, licenses, split seeds,
+filters, deduplication and contamination reports, tokenizer hashes, packed-shard
+hashes and the final executed-token count.
 
 Raw training data will not be copied into this model repository.
 
-## Evaluation
+## Current validation
 
-No validation NLL, held-out test NLL, or downstream benchmark result is
-published yet. Blank results are intentional: random-initialization loss and a
-smoke-test throughput number are not evidence of model quality.
+The implementation has tests for causal behavior, finite gradients, parameter
+shapes, document isolation, initialization invariants, dense execution, Muon
+parameter grouping, checkpoint resume and observation snapshots.
 
-The eventual release will include:
-
-- Base and Adaptive validation/test NLL;
-- matched-compute audit;
-- throughput and peak VRAM;
-- per-seed results or an explicit single-seed limitation;
-- route-dependence controls;
-- complete training logs;
-- checkpoint and artifact SHA-256 hashes; and
-- adopted, rejected, or inconclusive verdict.
+These are implementation checks, not evidence of language-model quality.
+Full pre-training has not started, so there are currently no valid validation
+NLL, held-out benchmark, safety, bias, factuality or downstream capability
+results.
 
 ## Intended use
 
-After trained weights are released, the intended uses will be:
+After trained weights are released, intended uses include:
 
-- research on small language-model architecture;
-- reproducible consumer-GPU pre-training experiments;
-- ablation and scaling studies; and
-- education about controlled model-development workflows.
+- research on consumer-GPU language-model pre-training;
+- Japanese-centred base-model and tokenizer studies;
+- KDA/MLA, depth-residual and optimizer ablations;
+- reproducible training and checkpoint-resume experiments; and
+- education about model-development and data-curation workflows.
 
 The current architecture preview is intended for code review and experiment
 design only.
 
-## Limitations and out-of-scope uses
+## Limitations
 
-- There are currently no pretrained weights, so the repository cannot generate
-  meaningful text.
-- Results at 110M parameters must not be assumed to transfer to larger models.
-- The model is text-only and does not reproduce Kimi K3's MoE, multimodal,
-  one-million-token, or post-training systems.
-- No safety, bias, factuality, multilingual, or downstream capability
-  evaluation has been completed.
-- This is not intended for production, high-stakes decisions, or deployment as
-  a general assistant.
+- No trained weights are available.
+- The model is text-only.
+- Training and evaluation are incomplete.
+- No production, high-stakes or general-assistant use is supported.
+- Single-GPU design constraints may limit throughput and experimental breadth.
 
-Additional limitations will be documented from observed evidence after
-training, including failed experiments.
-
-## AI-assisted development
-
-Frontier AI coding assistants, including GPT-5.6, were used for literature
-navigation, architecture discussion, implementation, test construction, bug
-finding, and experimental-design review.
-
-AI assistance is part of the research process, not evidence that the resulting
-architecture works. Only controlled and reproducible measurements can support
-that conclusion.
+Observed limitations and failed experiments will be added after training rather
+than inferred from architecture alone.
 
 ## Release checklist
 
-- [x] 110M-class architecture implementation
+- [x] 747M dense architecture implementation
 - [x] CPU correctness and invariance tests
-- [x] single-GPU forward/backward/checkpoint smoke test
+- [x] single-GPU forward/backward/checkpoint smoke path
+- [x] document-boundary isolation
+- [x] Muon training and resume path
 - [x] public architecture configuration
-- [x] tokenizer and tokenization pipeline
-- [ ] matched-compute Base pre-training
-- [ ] matched-compute Adaptive pre-training
-- [ ] held-out evaluation and compute audit
-- [ ] safetensors checkpoints and tokenizer
-- [ ] training logs, manifests, hashes, and final model card
+- [x] 49,152-piece tokenizer selected and validated
+- [ ] final deduplicated and decontaminated token pool
+- [ ] full pre-training
+- [ ] held-out evaluation
+- [ ] safetensors checkpoint and tokenizer release
+- [ ] training logs, manifests and artifact hashes
 
 ## Attribution
 
-“Kimi” and “Kimi K3” refer to Moonshot AI's work. KaiNomos-110M is independent
-and is not sponsored, endorsed, or maintained by Moonshot AI. Third-party
-papers, datasets, kernels, weights, and trademarks remain subject to their own
-terms.
+KaiNomos-747M is an independent research project inspired by selected published
+mechanisms. It is not sponsored, endorsed or maintained by Moonshot AI.
+Third-party papers, datasets, kernels, weights and trademarks remain subject to
+their own terms.

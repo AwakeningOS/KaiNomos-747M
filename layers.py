@@ -38,31 +38,10 @@ class SiTUMLP(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        channel_mask: torch.Tensor | None = None,
-        uniform_width: int | None = None,
     ) -> torch.Tensor:
-        """`uniform_width` slices instead of masking when every token agrees.
-
-        Masking multiplies the inactive channels by zero and still sums them in
-        `down_proj`, which is mathematically identical but changes the summation
-        order.  On the supernet that made the forced-Fixed policy differ from the
-        Standalone Base by ~2e-6 -- harmless in size, but it would have left the
-        equivalence claim resting on a tolerance instead of on identity.  When
-        the whole batch selects one prefix, slicing restores bit-exactness (and
-        is the cheaper path).
-        """
-        if uniform_width is not None and uniform_width < self.gate_proj.out_features:
-            w = uniform_width
-            gate = situ_gate(F.linear(x, self.gate_proj.weight[:w]))
-            up = softcap_up(F.linear(x, self.up_proj.weight[:w]))
-            return F.linear(gate * up, self.down_proj.weight[:, :w])
-
         gate = situ_gate(self.gate_proj(x))
         up = softcap_up(self.up_proj(x))
-        hidden = gate * up
-        if channel_mask is not None:
-            hidden = hidden * channel_mask.to(hidden.dtype)
-        return self.down_proj(hidden)
+        return self.down_proj(gate * up)
 
 
 __all__ = ["RMSNorm", "SiTUMLP", "situ_gate", "softcap_up"]

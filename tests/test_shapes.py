@@ -2,8 +2,8 @@
 
 import torch
 
-from config import K3MiniPlusPlusPlusConfig as Config
-from model import K3MiniPlusPlusPlusForCausalLM as Model
+from config import KaiNomosConfig as Config
+from model import KaiNomosForCausalLM as Model
 
 
 def test_forward_shapes_and_finite_losses():
@@ -14,7 +14,7 @@ def test_forward_shapes_and_finite_losses():
 
     assert out.logits.shape == (2, 16, cfg.vocab_size)
     assert out.mtp_logits.shape == (2, 14, cfg.vocab_size)   # loses two positions
-    for value in (out.loss, out.ntp_loss, out.mtp_loss, out.expected_cost):
+    for value in (out.loss, out.ntp_loss, out.mtp_loss):
         assert torch.isfinite(value).all()
 
     out.loss.backward()
@@ -23,7 +23,7 @@ def test_forward_shapes_and_finite_losses():
 
 
 def test_all_sixteen_layers_are_always_executed():
-    """No layer may be skipped; routing varies capacity inside a layer only."""
+    """The fixed production stack always contains all sixteen dense layers."""
     cfg = Config()
     assert cfg.num_hidden_layers == 16
     assert cfg.layer_pattern.count("KDA") == 12
@@ -32,25 +32,40 @@ def test_all_sixteen_layers_are_always_executed():
     assert len(m.model.layers) == 16
 
 
-def test_ffn_widths_are_nested_and_bracket_the_base_width():
+def test_the_deployed_model_is_dense():
+    """The production model has one FFN width and no routing controller."""
     cfg = Config()
-    tiers = cfg.joint_route.ffn_width_tiers
-    assert tiers == (1024, 1408, 1792, 2176, 2432, 2816)
-    assert tuple(sorted(set(tiers))) == tiers          # strictly nested prefixes
-    assert cfg.dense_intermediate_size == 1792 == cfg.joint_route.fixed_ffn_width
-    assert max(tiers) > cfg.dense_intermediate_size    # reinvestment room exists
-    assert min(tiers) < cfg.dense_intermediate_size    # pruning room exists
-    assert cfg.ffn_intermediate_size == 2816           # one matrix, not six FFNs
+    cfg.kda_impl = "reference"          # this test runs on CPU
+    assert cfg.dense_intermediate_size == 6144
+    assert cfg.ffn_intermediate_size == 6144
 
-    m = Model(Config.tiny())
+    m = Model(cfg)
     widths = {layer.ffn.gate_proj.out_features for layer in m.model.layers}
-    assert widths == {max(Config.tiny().joint_route.ffn_width_tiers)}
+    assert widths == {6144}
+
+    ids = torch.randint(0, cfg.vocab_size, (1, 8))
+    assert torch.isfinite(m(ids, labels=ids).loss)
 
 
-def test_parameter_budget_is_inside_the_target_range():
+def test_production_parameter_count_matches_public_architecture():
     report = Model(Config()).parameter_report()
-    assert 109_000_000 <= report["total_params"] <= 112_000_000, report["total_params"]
-    assert report["controller_params"] < 100_000
+    # h1536 / L16 / FFN 6144 dense with Muon. The complete production smoke path
+    # measured 18.08 GB peak at micro-batch 1 on a 24 GB RTX 3090.
+    assert report["total_params"] == 747_368_168
     assert report["mtp_only_params"] > 0
     assert (report["inference_backbone_params"]
             == report["total_params"] - report["mtp_only_params"])
+
+
+def test_every_parameter_receives_a_gradient():
+    """A parameter no forward pass reaches is dead weight, not capacity.
+
+    `delta_keys` held `num_blocks + 1` projections while the bank never offers
+    more than `num_blocks` sources, so the last one was never indexed.
+    """
+    cfg = Config.tiny()
+    m = Model(cfg)
+    ids = torch.randint(0, cfg.vocab_size, (2, 16))
+    m(ids, labels=ids).loss.backward()
+    missing = [n for n, p in m.named_parameters() if p.requires_grad and p.grad is None]
+    assert not missing, missing

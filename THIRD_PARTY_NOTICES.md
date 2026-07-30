@@ -1,6 +1,6 @@
-# Third-party notices — KaiNomos-110M
+# Third-party notices — KaiNomos-747M
 
-KaiNomos-110M is an **independent research implementation**. It is not
+KaiNomos-747M is an **independent research implementation**. It is not
 affiliated with, endorsed by, or derived from Moonshot AI or any other model
 provider, and it is not a distillation, conversion or reduced version of any
 released model.
@@ -13,19 +13,15 @@ and descriptions in public reports.
 
 | Mechanism | Origin | What this repository contributes |
 |---|---|---|
-| Recurrent-memory attention with delta-rule updates and address-wise decay | Kimi Linear report (arXiv:2510.26692) | independent implementation from the published recurrence; the DECAY_ONLY execution mode is this project's |
-| Latent attention with compressed KV, NoPE | Kimi K3 report | independent implementation; the BYPASS execution mode is this project's |
-| Block attention residuals over depth | Attention Residuals (arXiv:2603.15031) | superseded here by the Delta Block, which re-uses per-block *changes* rather than accumulated state |
+| Recurrent-memory attention with delta-rule updates and address-wise decay | Kimi Linear report (arXiv:2510.26692) | independent implementation from the published recurrence |
+| Latent attention with compressed KV, NoPE | Kimi K3 report | independent implementation with full-head QK normalization |
 | SiTU-GLU activation | Kimi K3 report | independent implementation |
 | Multiway dynamic dense connections | MUDDFormer (PMLR v267) | **restricted to Q/K/V only** in this project; the residual direction is left to the Delta Block so exactly one mechanism writes each path |
-| Delta attention residuals, low-rank routing | arXiv:2605.18855, arXiv:2607.09694 | the Projected Low-Rank Delta Block, its zero-gate identity initialisation and its tiered retrieval are this project's |
+| Delta Block Attention Residuals | Delta Attention Residuals, Cheng Luo, Zefan Cai, Junjie Hu, [arXiv:2605.18855](https://arxiv.org/abs/2605.18855) | **adopted as published**, not a mechanism of this project. Sources are the embedding, the completed block deltas and the open block's partial delta; keys are `norm(V)` at full width; the query is `w_l` in R^d, zero-initialised; the softmax is over the source axis; the routed value is added, never substituted. No gate, temperature or entropy term, as published. Written from the paper rather than ported from the reference implementation ([wdlctc/delta-attention-residuals-code](https://github.com/wdlctc/delta-attention-residuals-code), MIT), because that repository also carries gated, V-separated, null-source and entropy-regularised variants that the paper does not require and this project does not want. The paper's per-sublayer variant is implemented as `delta.granularity = "sublayer"` and is **not used** — measured OOM at micro-batch 2 and half the throughput at micro-batch 1 on this model's config; the Block variant is production. |
 | Multi-token prediction | arXiv:2404.19737 | independent single-extra-token implementation |
-| Joint budgeted execution routing | related to TriRoute (arXiv:2607.06601), Mixture-of-Depths (arXiv:2404.02258) | the four-axis controller, the per-batch price solve, and the equal-cost reinvestment formulation are this project's |
 
-**Original to this project:** the combination itself; the nested-FFN
-reinvestment tiers above the standard width; the per-batch price solve that
-closes the budget against the *deployed* policy; the identity-initialisation
-discipline applied to every added mechanism.
+**Original to this project:** the selected combination, its integration and the
+identity-initialisation discipline applied to added mechanisms.
 
 ## Runtime dependencies
 
@@ -53,9 +49,8 @@ an ordinary dependency.
 | Educational code | `HuggingFaceTB/stack-edu` metadata + Software Heritage content | per-file; see below |
 | Mathematics | `HuggingFaceTB/finemath` (finemath-4plus) | see dataset card |
 
-Exact revision SHAs, per-source document and byte counts, filters, and the
-stream range consumed are recorded in `data/mix/manifest.json`, so the pool can
-be rebuilt or audited.
+Exact revisions, counts, filters and artifact hashes are recorded in the
+external DoubleDragon-DataMix-v2 manifests; raw corpora are not copied here.
 
 ### Code licensing
 

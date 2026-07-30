@@ -1,60 +1,58 @@
-"""KaiNomos-110M.
+"""KaiNomos-747M.
 
 Per-layer order (spec section 6), identical in every one of the 16 layers:
 
-    1. Delta routing before attention
-    2. MUDD-QKV builds separate Q/K/V inputs from every visible depth state
+    1. Delta Block depth mixing before attention
+    2. MUDD builds the attention input streams from every visible depth state
     3. KDA or MLA
     4. residual add onto the *main* stream h
-    5. Delta routing before the FFN
-    6. nested FFN at the routed width
+    5. Delta Block depth mixing again before the FFN
+    6. dense FFN
     7. residual add onto h, then h joins the depth bank
     8. at a block boundary, the block's delta is banked
 
-The routed inputs `h_attn_input` / `h_ffn_input` feed the sublayers but are never
-themselves the residual base: sublayer outputs always land on `h`.  Routing the
-residual base would let the delta mechanism silently replace the stream instead
-of contributing to it, and a gate of zero would no longer be the identity.
+The mixed inputs `h_attn_input` / `h_ffn_input` feed the sublayers but are never
+themselves the residual base: sublayer outputs always land on `h`, so the update
+is always `h = old_h + sublayer_output`.  Writing `h = h_attn_input + attn_out`
+instead would add the mixed delta into the stream permanently and double-count it
+on the next hop, which is a different mechanism from the published one.
 
-No layer is ever skipped.  JointRoute varies the capacity used inside a layer,
-so even an easy token keeps updating its representation through all 16 layers.
+Depth mixing is Delta Block (arXiv:2605.18855): the sources are the embedding,
+the completed block deltas, and the delta the open block has made so far -- never
+the accumulated hidden state.
+
+No layer is ever skipped.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from cache import K3MiniCache
-from config import K3MiniPlusPlusPlusConfig
-from delta_block import DeltaBank, DeltaKeyProjection, DeltaRouter
-from joint_router import JointRouteController, RouteDecision, RouteState
+from config import KaiNomosConfig
+from delta_block import DeltaBank, DeltaRouter
 from kda import KDAttention
 from layers import RMSNorm, SiTUMLP
 from mla import GatedMLA as MLAttention
 from mtp import MTPHead, mtp_loss, mtp_slices
 from mudd_qkv import MuDDQKV
+from segments import mask_targets_at_boundaries
 
 
 @dataclass
-class K3MiniOutput:
+class KaiNomosOutput:
     logits: torch.Tensor
     loss: torch.Tensor | None = None
     ntp_loss: torch.Tensor | None = None
     mtp_logits: torch.Tensor | None = None
     mtp_loss: torch.Tensor | None = None
-    cache: K3MiniCache | None = None
-    joint_decisions: list = field(default_factory=list)
-    expected_cost: torch.Tensor | None = None
-    cost_target: float | None = None
-    full_policy_cost: float | None = None
 
 
 class DecoderLayer(nn.Module):
-    def __init__(self, config: K3MiniPlusPlusPlusConfig, index: int):
+    def __init__(self, config: KaiNomosConfig, index: int):
         super().__init__()
         self.config = config
         self.index = index
@@ -64,19 +62,27 @@ class DecoderLayer(nn.Module):
 
         # depth sources visible to this layer: embedding + every earlier output
         self.num_sources = index + 1
+        self.streams = config.mudd.streams_for(self.kind)
         self.mudd = MuDDQKV(h, self.num_sources, config.mudd.hidden, eps,
-                            config.mudd.streams) if config.mudd.enabled else None
+                            self.streams) if config.mudd.enabled else None
 
         self.attn = KDAttention(config) if self.kind == "KDA" else MLAttention(config)
+        # The single pre-attention norm, carried over from the 82M model.  MUDD
+        # mixes unnormalised depth states and this normalises the result, so at
+        # identity initialisation the attention input is exactly `attn_norm(h)` --
+        # the same tensor the 82M layer saw, with the same migrated weight.
+        self.attn_norm = RMSNorm(h, eps)
         self.ffn_norm = RMSNorm(h, eps)
         self.ffn = SiTUMLP(h, config.ffn_intermediate_size)
 
-        self.delta_attn = DeltaRouter(h, config.delta.key_rank, eps)
-        self.delta_ffn = DeltaRouter(h, config.delta.key_rank, eps)
+        # One router per sublayer position, each with its own norm and query:
+        # they ask different questions of the same sources.
+        self.delta_attn = DeltaRouter(h, eps)
+        self.delta_ffn = DeltaRouter(h, eps)
 
 
-class K3MiniPlusPlusPlus(nn.Module):
-    def __init__(self, config: K3MiniPlusPlusPlusConfig):
+class KaiNomosModel(nn.Module):
+    def __init__(self, config: KaiNomosConfig):
         super().__init__()
         self.config = config
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
@@ -84,13 +90,7 @@ class K3MiniPlusPlusPlus(nn.Module):
             [DecoderLayer(config, i) for i in range(config.num_hidden_layers)]
         )
         self.final_norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
-        self.delta_keys = DeltaKeyProjection(
-            config.hidden_size, config.delta.key_rank,
-            config.delta.num_blocks + 1, config.rms_norm_eps,
-        )
-        self.controller = JointRouteController(config)
         self.apply(self._init_weights)
-        self.controller.reset_to_fixed_policy()
         for layer in self.layers:
             if layer.mudd is not None:
                 layer.mudd.reset_to_identity()
@@ -107,75 +107,62 @@ class K3MiniPlusPlusPlus(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        route_state: RouteState | None = None,
-        return_route_stats: bool = False,
+        respect_documents: bool = True,
     ):
-        from cost_model import OrganCosts
+        from segments import cu_seqlens, document_starts, segment_ids
 
         cfg = self.config
+        # Document boundaries, derived from the separator in the tokens.  Every
+        # mechanism with a time axis has to be told about them: MLA must not attend
+        # across one, and KDA must not carry its recurrent state or its short
+        # convolution window across one.
+        segments = offsets = None
+        if respect_documents and input_ids.shape[1] > 1:
+            segments = segment_ids(input_ids, cfg.eod_token_id)
+            offsets = cu_seqlens(document_starts(input_ids, cfg.eod_token_id))
         h = self.embed_tokens(input_ids)
         depth_states = [h]
-        bank = DeltaBank()
-        bank.start_block(h)
-
-        costs = OrganCosts(cfg, input_ids.shape[1])
-        if route_state is None:
-            route_state = RouteState(
-                price=cfg.joint_route.price,
-                hard=not self.training,
-                force_fixed=cfg.joint_route.force_fixed,
-            )
-        decisions: list[RouteDecision] = []
-        memory: dict = {}
+        bank = DeltaBank(cfg.delta.granularity)
+        bank.start(h)      # the embedding is the first source, permanently
 
         for index, layer in enumerate(self.layers):
-            # both sublayer positions see the same set: completed block deltas
-            # plus the delta accumulated so far inside the current block
-            n_sources = index // cfg.block_size + 1
-            decision = self.controller(
-                h, index, layer.kind, n_sources, n_sources,
-                costs, route_state, 0, memory,
-            )
-            decisions.append(decision)
+            # 1. Delta Block depth mixing before attention. `h_attn_input` feeds the
+            # sublayer; the residual stream itself is untouched here.
+            h_attn_input = layer.delta_attn(h, bank.sources(h))
 
-            values = bank.sources(h)
-            keys = self.delta_keys(values) if values else []
-
-            # 1. delta routing before attention
-            h_attn_input = layer.delta_attn(
-                h, keys, values, decision.attn_res_tier, cfg.delta.tiers
-            )
-
-            # 2. MUDD-QKV over the depth states this layer can see
+            # 2. MUDD over the depth states this layer can see, then the layer's
+            # single pre-attention norm.  KDA mixes q/k/v; MLA mixes q/kv, since
+            # its K and V come from one latent.
             sources = depth_states[:-1] + [h_attn_input]
             if layer.mudd is not None:
-                streams = layer.mudd(sources)
+                mixed = layer.mudd(sources)
+                streams = {n: layer.attn_norm(t) for n, t in mixed.items()}
+            else:
+                normed = layer.attn_norm(h_attn_input)
+                streams = {name: normed for name in layer.streams}
+            if layer.kind == "KDA":
                 q_in, k_in, v_in = streams["q"], streams["k"], streams["v"]
             else:
-                q_in = k_in = v_in = h_attn_input
+                q_in = streams["q"]
+                k_in, v_in = streams["kv"], None
 
             # 3. attention; 4. residual onto the main stream, never onto the input
-            kwargs = {"q_input": q_in, "k_input": k_in, "v_input": v_in}
+            kwargs = {"q_input": q_in, "k_input": k_in, "v_input": v_in,
+                      "segments": segments}
             if layer.kind == "KDA":
-                kwargs["full_mask"] = decision.kda_full
-            else:
-                kwargs["read_mask"] = decision.mla_read
+                kwargs["seq_offsets"] = offsets
             attn_out, _ = layer.attn(**kwargs)
+            bank.record_sublayer(attn_out)
             h = h + attn_out
 
-            # 5. delta routing before the FFN, from the updated stream
-            values = bank.sources(h)
-            keys = self.delta_keys(values) if values else []
-            h_ffn_input = layer.delta_ffn(
-                h, keys, values, decision.attn_res_tier, cfg.delta.tiers
-            )
+            # 5. depth mixing again before the FFN, from the updated stream: the
+            # partial delta has grown by the attention output.
+            h_ffn_input = layer.delta_ffn(h, bank.sources(h))
 
-            # 6-7. nested FFN at the routed width, residual onto h
-            h = h + layer.ffn(
-                layer.ffn_norm(h_ffn_input),
-                channel_mask=decision.ffn_channel_mask,
-                uniform_width=decision.ffn_uniform_width,
-            )
+            # 6-7. dense FFN, residual onto h
+            ffn_out = layer.ffn(layer.ffn_norm(h_ffn_input))
+            bank.record_sublayer(ffn_out)
+            h = h + ffn_out
             depth_states.append(h)
 
             # 8. bank the block delta at a block boundary
@@ -183,17 +170,18 @@ class K3MiniPlusPlusPlus(nn.Module):
                 bank.close_block(h)
 
         hidden = self.final_norm(h)
-        variable = torch.stack([d.expected_variable_cost for d in decisions]).sum()
-        expected = costs.fixed_share + variable
-        stats = {"depth_states": depth_states} if return_route_stats else {}
-        return hidden, decisions, expected, costs, stats
+        # `segments` always travels back: the MTP head and the loss both need the
+        # same boundaries the body just used, and recomputing them there would let
+        # the two drift apart.
+        stats = {"segments": segments, "seq_offsets": offsets}
+        return hidden, stats
 
 
-class K3MiniPlusPlusPlusForCausalLM(nn.Module):
-    def __init__(self, config: K3MiniPlusPlusPlusConfig):
+class KaiNomosForCausalLM(nn.Module):
+    def __init__(self, config: KaiNomosConfig):
         super().__init__()
         self.config = config
-        self.model = K3MiniPlusPlusPlus(config)
+        self.model = KaiNomosModel(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
@@ -203,59 +191,66 @@ class K3MiniPlusPlusPlusForCausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         labels: torch.Tensor | None = None,
-        route_state: RouteState | None = None,
         use_mtp: bool = True,
-    ) -> K3MiniOutput:
-        hidden, decisions, expected, costs, _ = self.model(input_ids, route_state)
+    ) -> KaiNomosOutput:
+        hidden, stats = self.model(input_ids)
         logits = self.lm_head(hidden)
+        segments = stats.get("segments")
+        eod = self.config.eod_token_id
 
         loss = ntp = mtp_l = None
         mtp_logits = None
         if labels is not None:
+            targets = labels[:, 1:]
+            if segments is not None:
+                # Position i predicts token i+1, so the only pair that straddles a
+                # boundary is the one whose input is the separator itself.
+                targets = mask_targets_at_boundaries(
+                    targets, input_ids[:, :-1], eod
+                )
             ntp = F.cross_entropy(
                 logits[:, :-1].reshape(-1, logits.shape[-1]).float(),
-                labels[:, 1:].reshape(-1), ignore_index=-100,
+                targets.reshape(-1), ignore_index=-100,
             )
             loss = ntp
             if self.mtp is not None and use_mtp and input_ids.shape[1] >= 3:
                 h_sl, e_sl, t_sl = mtp_slices(input_ids)
                 fused = self.mtp(hidden[:, h_sl],
-                                 self.model.embed_tokens(input_ids[:, e_sl]))
+                                 self.model.embed_tokens(input_ids[:, e_sl]),
+                                 segments=None if segments is None else segments[:, h_sl])
                 mtp_logits = self.lm_head(self.model.final_norm(fused))
-                mtp_l = mtp_loss(mtp_logits, labels[:, t_sl])
+                mtp_targets = labels[:, t_sl]
+                if segments is not None:
+                    # MTP reads position i and the token at i+1 to predict i+2, so
+                    # a separator at *either* of those two inputs makes the triple
+                    # cross a boundary.
+                    crosses = ((input_ids[:, h_sl] == eod)
+                               | (input_ids[:, e_sl] == eod))
+                    mtp_targets = mtp_targets.masked_fill(crosses, -100)
+                mtp_l = mtp_loss(mtp_logits, mtp_targets)
                 loss = loss + self.config.mtp.loss_weight * mtp_l
 
-        return K3MiniOutput(
+        return KaiNomosOutput(
             logits=logits, loss=loss, ntp_loss=ntp,
             mtp_logits=mtp_logits, mtp_loss=mtp_l,
-            joint_decisions=decisions, expected_cost=expected,
-            cost_target=costs.budget_target, full_policy_cost=costs.full_policy_cost,
         )
 
     def parameter_report(self) -> dict:
         total = sum(p.numel() for p in self.parameters())
         mtp_only = sum(p.numel() for n, p in self.named_parameters() if n.startswith("mtp."))
-        controller = sum(p.numel() for n, p in self.named_parameters() if "controller" in n)
         mudd = sum(p.numel() for n, p in self.named_parameters() if ".mudd." in n)
         delta = sum(p.numel() for n, p in self.named_parameters()
-                    if "delta_" in n or n.startswith("model.delta_keys"))
+                    if "delta_" in n)
         return {
             "total_params": total,
             "trainable_params": sum(p.numel() for p in self.parameters() if p.requires_grad),
             "inference_backbone_params": total - mtp_only,
             "mtp_only_params": mtp_only,
-            "controller_params": controller,
             "mudd_params": mudd,
             "delta_params": delta,
         }
 
 
-# Public names; the K3Mini* spellings stay as aliases during the migration.
-KaiNomosForCausalLM = K3MiniPlusPlusPlusForCausalLM
-KaiNomosModel = K3MiniPlusPlusPlus
-KaiNomosOutput = K3MiniOutput
-
 __all__ = [
     "KaiNomosForCausalLM", "KaiNomosModel", "KaiNomosOutput",
-    "K3MiniPlusPlusPlusForCausalLM", "K3MiniPlusPlusPlus", "K3MiniOutput",
 ]

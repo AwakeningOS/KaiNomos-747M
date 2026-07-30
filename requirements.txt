@@ -1,7 +1,24 @@
+# Core
 numpy>=1.26
 torch>=2.4
+
+# Tokenizer and model-card/data inspection
+sentencepiece>=0.2
+tokenizers>=0.20
+
+# Kimi Delta Attention Triton kernels.  Without these, kda_impl="auto" falls back
+# to the sequential PyTorch reference without saying so -- measured ~80x slower
+# per KDA layer, which turns GPU training from slow into impossible.
+fla-core>=0.4
+einops>=0.8
+triton>=3.3
+
+# Data inspection and benchmark-contamination matcher
 datasets>=3.0
-huggingface_hub>=1.0
+huggingface_hub>=1.5,<2
+transformers>=5.14,<6
 boto3>=1.35
 xxhash>=3.4
+
+# Tests
 pytest>=8.0

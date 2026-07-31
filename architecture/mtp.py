@@ -15,10 +15,9 @@ during training only and can be dropped at inference.
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-
 from layers import RMSNorm, SiTUMLP
+from torch import nn
 
 
 class MTPHead(nn.Module):

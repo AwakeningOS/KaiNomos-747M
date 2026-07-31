@@ -2,25 +2,25 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
+from dataclasses import dataclass
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-
 from config import KaiNomosConfig
 from layers import RMSNorm
+from torch import nn
 
 
 @dataclass
 class MLACache:
-    latent_kv: torch.Tensor | None = None
-    shared_key: torch.Tensor | None = None
+    latent: torch.Tensor | None = None
+    key_inv_rms: torch.Tensor | None = None
+    segment_ids: torch.Tensor | None = None
 
     @property
     def seq_len(self) -> int:
-        return 0 if self.latent_kv is None else self.latent_kv.shape[1]
+        return 0 if self.latent is None else self.latent.shape[1]
 
 
 class GatedMLA(nn.Module):
@@ -36,9 +36,7 @@ class GatedMLA(nn.Module):
         self.q_a_norm = RMSNorm(cfg.q_lora_rank, config.rms_norm_eps)
         self.q_b_proj = nn.Linear(cfg.q_lora_rank, cfg.num_heads * cfg.q_head_dim, bias=False)
 
-        self.kv_a_proj = nn.Linear(
-            config.hidden_size, cfg.kv_lora_rank + cfg.qk_shared_head_dim, bias=False
-        )
+        self.kv_a_proj = nn.Linear(config.hidden_size, cfg.kv_lora_rank, bias=False)
         self.kv_a_norm = RMSNorm(cfg.kv_lora_rank, config.rms_norm_eps)
         self.kv_b_proj = nn.Linear(
             cfg.kv_lora_rank,
@@ -75,64 +73,52 @@ class GatedMLA(nn.Module):
         return q.view(b, t, self.num_heads, self.cfg.q_head_dim).transpose(1, 2)
 
     def project_latent(self, x: torch.Tensor):
-        latent, shared = self.kv_a_proj(x).split(
-            [self.cfg.kv_lora_rank, self.cfg.qk_shared_head_dim], dim=-1
-        )
-        return latent, shared
+        return self.kv_a_norm(self.kv_a_proj(x))
 
-    def expand_kv(self, latent: torch.Tensor, shared: torch.Tensor):
+    def expand_kv(self, latent: torch.Tensor):
         b, t, _ = latent.shape
-        kv = self.kv_b_proj(self.kv_a_norm(latent))
+        kv = self.kv_b_proj(latent)
         kv = kv.view(
             b, t, self.num_heads, self.cfg.qk_nope_head_dim + self.cfg.v_head_dim
         )
         content, value = kv.split(
             [self.cfg.qk_nope_head_dim, self.cfg.v_head_dim], dim=-1
         )
-        shared = shared.unsqueeze(2).expand(b, t, self.num_heads, -1)
-        key = torch.cat([content, shared], dim=-1)
-        return key.transpose(1, 2), value.transpose(1, 2)
+        return content.transpose(1, 2), value.transpose(1, 2)
 
     def forward(
-        self, x: torch.Tensor | None = None, cache: MLACache | None = None,
+        self, x: torch.Tensor, cache: MLACache | None = None,
         use_cache: bool = False,
-        q_input=None, k_input=None, v_input=None,
         segments: torch.Tensor | None = None,
     ):
-        # MLA compresses K and V jointly into one latent, so the KV stream is
-        # taken from `k_input`; splitting it further would need two latents and
-        # would change the mechanism rather than its inputs.
-        if x is None:
-            x = q_input
-        if v_input is not None:
-            raise ValueError(
-                "GatedMLA has a single KV input: K and V share one compressed "
-                "latent, so pass the mixed KV stream as k_input.  Accepting a "
-                "separate v_input silently discarded it and left the caller's "
-                "V mixing coefficients with no gradient."
-            )
-        kv_src = x if k_input is None else k_input
         b, t, _ = x.shape
-        latent, shared = self.project_latent(kv_src)
+        latent = self.project_latent(x)
+        current_segments = segments
         past = 0 if cache is None else cache.seq_len
-        if cache is not None and cache.latent_kv is not None:
-            latent = torch.cat([cache.latent_kv, latent], dim=1)
-            shared = torch.cat([cache.shared_key, shared], dim=1)
-        q = self.project_q(x if q_input is None else q_input)
-        k, v = self.expand_kv(latent, shared)
+        if cache is not None and cache.latent is not None:
+            latent = torch.cat([cache.latent, latent], dim=1)
+            if cache.segment_ids is not None and segments is not None:
+                current_segments = torch.cat([cache.segment_ids, segments], dim=1)
+        q = self.project_q(x)
+        k, v = self.expand_kv(latent)
+        key_inv_rms = torch.rsqrt(
+            k.float().square().mean(-1, keepdim=True) + self.k_norm.eps
+        )
         q = self.q_norm(q)
         k = self.k_norm(k)
 
-        if segments is not None:
-            if cache is not None:
-                raise NotImplementedError(
-                    "document masking with a KV cache needs the segment id of "
-                    "every cached position; only the cache-free path is supported"
-                )
+        if current_segments is not None:
             from segments import document_mask
+            if past == 0:
+                mask = document_mask(current_segments)
+            else:
+                query_segments = current_segments[:, -t:]
+                same = query_segments[:, :, None] == current_segments[:, None, :]
+                q_pos = torch.arange(past, past + t, device=x.device).view(1, t, 1)
+                k_pos = torch.arange(current_segments.shape[1], device=x.device).view(1, 1, -1)
+                mask = (same & (k_pos <= q_pos)).unsqueeze(1)
             out = F.scaled_dot_product_attention(
-                q.float(), k.float(), v.float(),
-                attn_mask=document_mask(segments), scale=self.scale,
+                q.float(), k.float(), v.float(), attn_mask=mask, scale=self.scale
             )
         elif past == 0 and t == k.shape[2]:
             out = F.scaled_dot_product_attention(
@@ -148,7 +134,11 @@ class GatedMLA(nn.Module):
         gate = torch.sigmoid(self.output_gate(x).float())
         out = (out.float() * gate).to(x.dtype)
         y = self.output_proj(out)
-        return y, MLACache(latent, shared) if use_cache else None
+        return y, MLACache(
+            latent=latent,
+            key_inv_rms=key_inv_rms.transpose(1, 2),
+            segment_ids=current_segments,
+        ) if use_cache else None
 
 
 __all__ = ["GatedMLA", "MLACache"]

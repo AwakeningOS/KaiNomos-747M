@@ -82,7 +82,7 @@ def masked_lagged_sum(
     exactly what running the convolution per document with zero left padding
     gives -- without having to actually split the batch.
     """
-    channels, _, kernel = weight.shape
+    _, _, kernel = weight.shape
     out = x * weight[:, 0, kernel - 1]
     for lag in range(1, kernel):
         shifted = F.pad(x[:, :-lag], (0, 0, lag, 0))
@@ -109,6 +109,10 @@ def mask_targets_at_boundaries(
 
 
 __all__ = [
-    "document_starts", "segment_ids", "cu_seqlens", "document_mask",
-    "masked_lagged_sum", "mask_targets_at_boundaries",
+    "cu_seqlens",
+    "document_mask",
+    "document_starts",
+    "mask_targets_at_boundaries",
+    "masked_lagged_sum",
+    "segment_ids",
 ]

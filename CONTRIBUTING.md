@@ -36,7 +36,7 @@ invalidates a result, retain the record and mark it invalid.
 
 - Keep one causal claim per pull request when practical.
 - Add tests for new mechanisms and their initialization invariants.
-- Run `pytest -q`.
+- Run `cd architecture && PYTHONPATH=. pytest --rootdir=. --confcutdir=. -q tests`.
 - Do not commit datasets, secrets, or `.pt`/`.safetensors` checkpoints.
 - Explain how the comparison controls parameter count, tokens, and compute.
 

@@ -6,16 +6,15 @@ import math
 from dataclasses import dataclass
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-
 from config import KaiNomosConfig
 from layers import RMSNorm
+from torch import nn
 
 try:
     from fla.ops.kda import chunk_kda, fused_recurrent_kda
     FLA_AVAILABLE = True
-except Exception:
+except ImportError:
     chunk_kda = fused_recurrent_kda = None
     FLA_AVAILABLE = False
 
@@ -36,6 +35,11 @@ class CausalDepthwiseConv1d(nn.Module):
         self.weight = nn.Parameter(torch.zeros(channels, 1, kernel_size))
         with torch.no_grad():
             self.weight[:, 0, -1] = 1.0
+
+    @torch.no_grad()
+    def reset_identity(self) -> None:
+        self.weight.zero_()
+        self.weight[:, 0, -1] = 1.0
 
     def forward(self, x: torch.Tensor, state: torch.Tensor | None = None,
                 segments: torch.Tensor | None = None):
@@ -132,51 +136,37 @@ class KDAttention(nn.Module):
 
         self.f_a_proj = nn.Linear(self.hidden_size, cfg.decay_rank, bias=False)
         self.f_b_proj = nn.Linear(cfg.decay_rank, self.inner, bias=False)
-        self.A_log = nn.Parameter(torch.log(torch.empty(self.num_heads).uniform_(*cfg.a_log_init)))
-        self.dt_bias = nn.Parameter(self._retention_bias(cfg))
+        self.A_log = nn.Parameter(torch.zeros(self.num_heads))
+        self.dt_bias = nn.Parameter(torch.empty(self.inner))
         self.beta_proj = nn.Linear(self.hidden_size, self.num_heads, bias=False)
         self.output_gate = nn.Linear(self.hidden_size, self.inner, bias=False)
         self.output_norm = RMSNorm(self.head_dim, config.rms_norm_eps)
         self.output_proj = nn.Linear(self.inner, self.hidden_size, bias=False)
 
-    def _retention_bias(self, cfg) -> torch.Tensor:
-        """Solve `dt_bias` so a fresh layer starts at `cfg.init_retention`/token.
+        self.reset_kda_parameters()
 
-        The decay is `g = lower_bound * sigmoid(exp(A_log) * (raw + dt_bias))` and
-        the state is multiplied by `exp(g)` each step.  With `dt_bias = 0` and
-        `raw ~ 0` that is `exp(-5 * 0.5) = 0.082`, so an untrained layer discards
-        92% of its recurrent state every token -- it cannot carry information far
-        enough to learn that carrying it was useful.  Inverting the expression at
-        `raw = 0` for the wanted retention gives a bias that starts the layer near
-        the identity in time and lets training introduce forgetting.
-        """
-        retention = float(cfg.init_retention)
-        if not 0.0 < retention < 1.0:
-            raise ValueError("kda.init_retention must lie strictly between 0 and 1")
-        # sigmoid(z) = ln(retention) / lower_bound, then z = logit(that)
-        target = math.log(retention) / cfg.gate_lower_bound
-        if not 0.0 < target < 1.0:
-            raise ValueError(
-                "kda.init_retention is unreachable for this gate_lower_bound"
-            )
-        z = math.log(target / (1.0 - target))
-        # exp(A_log) is per head; dt_bias is per channel, so broadcast the head
-        # scale across that head's channels.
-        scale = self.A_log.detach().exp().view(self.num_heads, 1)
-        bias = (z / scale).expand(self.num_heads, self.head_dim)
-        return bias.reshape(-1).contiguous()
+    @torch.no_grad()
+    def reset_kda_parameters(self, generator=None) -> None:
+        """Apply the pinned FLA/K3-compatible decay and convolution init."""
+        self.A_log.zero_()
+        uniform = torch.empty_like(self.dt_bias).uniform_(
+            0.0, 1.0, generator=generator
+        )
+        dt = torch.exp(
+            uniform * (math.log(self.cfg.dt_init_max) - math.log(self.cfg.dt_init_min))
+            + math.log(self.cfg.dt_init_min)
+        ).clamp_min(1e-4)
+        self.dt_bias.copy_(dt + torch.log(-torch.expm1(-dt)))
+        self.q_conv.reset_identity()
+        self.k_conv.reset_identity()
+        self.v_conv.reset_identity()
 
-    def _project(self, x: torch.Tensor, cache: KDACache | None,
-                 q_src=None, k_src=None, v_src=None, segments=None):
-        """MUDD supplies a separate source per stream; otherwise all three are x."""
-        q_src = x if q_src is None else q_src
-        k_src = x if k_src is None else k_src
-        v_src = x if v_src is None else v_src
-        q, qs = self.q_conv(self.q_proj(q_src),
+    def _project(self, x: torch.Tensor, cache: KDACache | None, segments=None):
+        q, qs = self.q_conv(self.q_proj(x),
                             None if cache is None else cache.q_conv_state, segments)
-        k, ks = self.k_conv(self.k_proj(k_src),
+        k, ks = self.k_conv(self.k_proj(x),
                             None if cache is None else cache.k_conv_state, segments)
-        v, vs = self.v_conv(self.v_proj(v_src),
+        v, vs = self.v_conv(self.v_proj(x),
                             None if cache is None else cache.v_conv_state, segments)
         shape = (*x.shape[:2], self.num_heads, self.head_dim)
         return (
@@ -191,19 +181,12 @@ class KDAttention(nn.Module):
         return raw.view(*x.shape[:2], self.num_heads, self.head_dim)
 
     def forward(
-        self, x: torch.Tensor | None = None, cache: KDACache | None = None,
+        self, x: torch.Tensor, cache: KDACache | None = None,
         use_cache: bool = False,
-        q_input=None, k_input=None, v_input=None,
         segments: torch.Tensor | None = None,
         seq_offsets: torch.Tensor | None = None,
     ):
-        # The gates, decay and output gate read the *query* stream: they describe
-        # what this position is asking for, which is the same role Q plays.
-        if x is None:
-            x = q_input
-        q, k, v, conv_states = self._project(
-            x, cache, q_input, k_input, v_input, segments
-        )
+        q, k, v, conv_states = self._project(x, cache, segments)
         raw_decay = self._raw_decay(x)
         beta_logits = self.beta_proj(x).float()
         initial = None if cache is None else cache.recurrent_state
@@ -266,6 +249,10 @@ class KDAttention(nn.Module):
 
 
 __all__ = [
-    "KDAttention", "KDACache", "CausalDepthwiseConv1d",
-    "lower_bounded_log_decay", "recurrent_kda", "FLA_AVAILABLE",
+    "FLA_AVAILABLE",
+    "CausalDepthwiseConv1d",
+    "KDACache",
+    "KDAttention",
+    "lower_bounded_log_decay",
+    "recurrent_kda",
 ]

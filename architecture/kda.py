@@ -222,7 +222,10 @@ class KDAttention(nn.Module):
                 cu_seqlens=seq_offsets,
             )
             out = out.reshape(rows, -1, *out.shape[2:])
-        elif x.shape[1] == 1:
+        elif use_cache and segments is None:
+            # Keep generation prefill and decode in the recurrent kernel
+            # family.  Switching a multi-token prompt to chunk_kda creates a
+            # larger BF16 difference than batching fused recurrent work.
             out, state = fused_recurrent_kda(
                 q=q, k=k, v=v, g=raw_decay, beta=beta,
                 A_log=self.A_log, dt_bias=self.dt_bias,

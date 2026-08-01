@@ -108,6 +108,8 @@ python examples/chat.py --checkpoint runs/myrun/step_00000001.pt
 ```
 
 Use `/clear` to discard the transcript and `/exit` to quit.
+Prompt prefill and temporal caches are enabled automatically; see
+[INFERENCE.md](INFERENCE.md) for the measured path.
 
 ## What must remain compatible
 

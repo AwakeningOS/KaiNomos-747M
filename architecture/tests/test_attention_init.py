@@ -19,6 +19,7 @@ def test_kda_official_compatible_initialization():
 def test_mla_is_strict_nope_and_cache_has_no_full_kv():
     config = KaiNomosConfig.tiny()
     module = GatedMLA(config).eval()
+    assert not module.absorbed_decode_enabled
     assert config.mla.qk_shared_head_dim == 0
     x = torch.randn(1, 5, config.hidden_size)
     with torch.no_grad():

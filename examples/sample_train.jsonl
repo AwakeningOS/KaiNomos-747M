@@ -1,0 +1,2 @@
+{"text":"KaiNomos is a decoder-only language model designed for single-GPU training."}
+{"text":"User: What is an end-of-document token?\nAssistant: It marks a document boundary so model state and loss do not leak into the next document."}

@@ -1,0 +1,2 @@
+{"text":"A validation split estimates next-token loss on documents excluded from training."}
+{"text":"User: Why keep validation data separate?\nAssistant: Separation makes the reported loss more informative about unseen text."}

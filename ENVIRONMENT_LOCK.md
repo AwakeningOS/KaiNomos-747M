@@ -13,6 +13,10 @@ test environment, not a promise of broad compatibility.
 
 ## Python environment
 
+The table below records the environment used for the RTX 3090 measurements.
+Local virtual-environment paths are machine-specific and are not part of the
+repository. For a fresh clone, create `.venv` as shown in the root README.
+
 | Package | Version |
 | --- | --- |
 | Python | 3.12.13 |
@@ -35,5 +39,6 @@ python -m ruff check .
 
 `kda_impl="auto"` must resolve to the FLA implementation on CUDA. The sequential
 reference implementation is intended for correctness testing, not production
-throughput. CUDA BF16/FLA equivalence and the measured peak-VRAM result remain
-pending for KaiNomos-750M and must not be inferred from the superseded 747M run.
+throughput. CUDA BF16/FLA parity passed for the adopted runtime. Its ten-step
+confirmation measured 21.957 GiB peak reserved under the 22.0 GiB hard limit;
+details are in `architecture/OPTIMIZATION_STAGE2_RESULTS_2026-08-01.md`.

@@ -1,0 +1,37 @@
+{
+  "status_date": "2026-08-01",
+  "status": "adopted",
+  "hardware": "NVIDIA RTX 3090 24 GB",
+  "hard_peak_reserved_limit_gib": 22.0,
+  "selected_runtime": {
+    "activation_checkpointing": true,
+    "micro_batch": 16,
+    "gradient_accumulation": 4,
+    "tokens_per_optimizer_step": 65536,
+    "lm_loss": "chunked",
+    "lm_chunk_tokens": 32,
+    "mla_attention": "varlen_flash_bf16",
+    "mla_gate": "eager-fp32",
+    "kda_final_state": "training-off",
+    "kda_disable_recompute": false,
+    "rms_norm": "fla-bf16-all",
+    "delta_score": "fla-rms-linear",
+    "compile_mode": "off",
+    "pytorch_cuda_alloc_conf": "expandable_segments:True"
+  },
+  "confirmation": {
+    "steps": 10,
+    "steady_median_tokens_per_second": 3587.859070888041,
+    "steady_mean_tokens_per_second": 3578.5517956163976,
+    "peak_allocated_gib": 21.35566473007202,
+    "peak_reserved_gib": 21.95703125,
+    "all_finite": true
+  },
+  "fallback": {
+    "condition": "runtime instability or peak_reserved_gib above 22.0",
+    "micro_batch": 8,
+    "gradient_accumulation": 8,
+    "steady_tokens_per_second": 3518.967,
+    "peak_reserved_gib": 17.285
+  }
+}

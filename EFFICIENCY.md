@@ -299,3 +299,6 @@ The generated raw benchmark JSON files are intentionally excluded from the
 public repository together with training runs and checkpoints. The compact
 adoption registry is `scripts/optimization_candidates_stage2.json`; the
 reusable measurements and conclusions are fixed in this document.
+
+Prompt prefill and autoregressive decode are measured separately in
+[INFERENCE.md](INFERENCE.md).

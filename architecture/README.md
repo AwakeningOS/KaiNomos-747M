@@ -3,7 +3,7 @@
 This directory contains the adopted `kainomos_750m_v1` implementation.
 
 For installation, training, and inference, start with the root `README.md`,
-`TRAINING.md`, and `examples/quickstart.py`.
+`TRAINING.md`, `INFERENCE.md`, and `examples/quickstart.py`.
 
 ## Frozen shape
 

@@ -50,6 +50,10 @@ python examples/chat.py --checkpoint runs/myrun/step_00000001.pt
 ```
 
 See [TRAINING.md](TRAINING.md) for input formats and source mixing.
+Generation prefills each EOD-delimited prompt segment in one call, then passes
+only the new token while reusing KDA state and the MLA latent cache. Measurements
+and the rejected absorbed-MLA decode candidate are in
+[INFERENCE.md](INFERENCE.md).
 
 ## How the model reads a sequence
 
@@ -213,6 +217,7 @@ scripts/
 ├── run_kainomos_runtime_tuned.py       # exact resume with the selected runtime
 ├── kainomos_optimization_runtime.py    # state-dict-preserving runtime patches
 ├── benchmark_kainomos_runtime_candidate.py
+├── benchmark_kainomos_generation.py    # prefill/decode A/B
 └── validate_optimization_cuda.py       # CUDA parity gates
 examples/
 ├── quickstart.py       # minimal full CUDA forward pass

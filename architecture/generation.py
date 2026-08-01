@@ -27,21 +27,46 @@ def cached_forward(
     dropped immediately before processing the first token after EOD.
     """
     state = state or GenerationState()
-    outputs = []
+    outputs: list[torch.Tensor] = []
     cache = state.cache
     previous_was_eod = state.previous_was_eod
-    for position in range(input_ids.shape[1]):
-        if previous_was_eod:
-            cache = None
-        token = input_ids[:, position:position + 1]
+
+    def forward_chunk(tokens: torch.Tensor) -> None:
+        nonlocal cache
         result = model(
-            token,
+            tokens,
             respect_documents=False,
             cache=cache,
             use_cache=True,
         )
         outputs.append(result.logits)
         cache = result.cache
+
+    if previous_was_eod:
+        cache = None
+
+    eod = input_ids == model.config.eod_token_id
+    aligned_eod = input_ids.shape[0] == 1 or torch.equal(eod, eod[:1].expand_as(eod))
+    if aligned_eod:
+        boundaries = eod[0].nonzero(as_tuple=False).flatten().tolist()
+        start = 0
+        for position in boundaries:
+            forward_chunk(input_ids[:, start:position + 1])
+            start = position + 1
+            if start < input_ids.shape[1]:
+                cache = None
+        if start < input_ids.shape[1]:
+            forward_chunk(input_ids[:, start:])
+        previous_was_eod = bool(eod[:, -1].all())
+        return torch.cat(outputs, dim=1), GenerationState(cache, previous_was_eod)
+
+    # Different EOD positions in one batch cannot share one ModelCache reset.
+    # Preserve the original tokenwise behavior for that uncommon API case.
+    for position in range(input_ids.shape[1]):
+        if previous_was_eod:
+            cache = None
+        token = input_ids[:, position : position + 1]
+        forward_chunk(token)
         previous_was_eod = bool((token == model.config.eod_token_id).all())
     return torch.cat(outputs, dim=1), GenerationState(cache, previous_was_eod)
 

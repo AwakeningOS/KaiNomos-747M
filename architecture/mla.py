@@ -45,6 +45,10 @@ class GatedMLA(nn.Module):
         )
         self.output_gate = nn.Linear(config.hidden_size, cfg.num_heads * cfg.v_head_dim, bias=False)
         self.output_proj = nn.Linear(cfg.num_heads * cfg.v_head_dim, config.hidden_size, bias=False)
+        # The algebraically equivalent latent-only decode path remains available
+        # for benchmarking, but RTX 3090 A/B medians did not beat the explicit
+        # PyTorch path.  Keep the measured winner as the production default.
+        self.absorbed_decode_enabled = False
 
         # QK normalisation over the whole head, applied after projection.
         #
@@ -86,13 +90,92 @@ class GatedMLA(nn.Module):
         )
         return content.transpose(1, 2), value.transpose(1, 2)
 
+    def split_kv_weights(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return per-head key/value up-projection weights."""
+        width = self.cfg.qk_nope_head_dim + self.cfg.v_head_dim
+        weight = self.kv_b_proj.weight.view(
+            self.num_heads, width, self.cfg.kv_lora_rank
+        )
+        return weight.split(
+            [self.cfg.qk_nope_head_dim, self.cfg.v_head_dim], dim=1
+        )
+
+    def project_key(self, latent: torch.Tensor) -> torch.Tensor:
+        key_weight, _ = self.split_kv_weights()
+        b, t, _ = latent.shape
+        key = F.linear(latent, key_weight.flatten(0, 1))
+        return key.view(
+            b, t, self.num_heads, self.cfg.qk_nope_head_dim
+        ).transpose(1, 2)
+
+    def key_inverse_rms(self, key: torch.Tensor) -> torch.Tensor:
+        return torch.rsqrt(
+            key.float().square().mean(-1, keepdim=True) + self.k_norm.eps
+        )
+
+    def absorbed_decode(
+        self,
+        x: torch.Tensor,
+        current_latent: torch.Tensor,
+        cache: MLACache,
+    ) -> tuple[torch.Tensor, MLACache]:
+        """Decode one token without expanding historical keys and values."""
+        latent = torch.cat([cache.latent, current_latent], dim=1)
+        key_weight, value_weight = self.split_kv_weights()
+
+        current_key = self.project_key(current_latent)
+        current_inverse_rms = self.key_inverse_rms(current_key).transpose(1, 2)
+        cached_inverse_rms = cache.key_inv_rms
+        if cached_inverse_rms is None:
+            cached_key = self.project_key(cache.latent)
+            cached_inverse_rms = self.key_inverse_rms(cached_key).transpose(1, 2)
+        key_inverse_rms = torch.cat(
+            [cached_inverse_rms, current_inverse_rms], dim=1
+        )
+
+        query = self.q_norm(self.project_q(x)).float()
+        absorbed_query = torch.matmul(
+            query * self.k_norm.weight.float(),
+            key_weight.float(),
+        )
+        latent32 = latent.float().unsqueeze(1)
+        score = torch.matmul(
+            absorbed_query, latent32.transpose(-1, -2)
+        )
+        score = score * key_inverse_rms.squeeze(-1).transpose(1, 2).unsqueeze(2)
+        probability = torch.softmax(score * self.scale, dim=-1)
+        latent_context = torch.matmul(probability, latent32)
+        out = torch.matmul(
+            latent_context, value_weight.float().transpose(-1, -2)
+        )
+        out = out.transpose(1, 2).reshape(
+            x.shape[0], 1, self.num_heads * self.cfg.v_head_dim
+        )
+        gate = torch.sigmoid(self.output_gate(x).float())
+        y = self.output_proj((out * gate).to(x.dtype))
+        return y, MLACache(
+            latent=latent,
+            key_inv_rms=key_inverse_rms,
+            segment_ids=None,
+        )
+
     def forward(
         self, x: torch.Tensor, cache: MLACache | None = None,
         use_cache: bool = False,
         segments: torch.Tensor | None = None,
     ):
         b, t, _ = x.shape
-        latent = self.project_latent(x)
+        current_latent = self.project_latent(x)
+        if (
+            cache is not None
+            and cache.latent is not None
+            and t == 1
+            and segments is None
+            and self.absorbed_decode_enabled
+        ):
+            return self.absorbed_decode(x, current_latent, cache)
+
+        latent = current_latent
         current_segments = segments
         past = 0 if cache is None else cache.seq_len
         if cache is not None and cache.latent is not None:
@@ -101,9 +184,7 @@ class GatedMLA(nn.Module):
                 current_segments = torch.cat([cache.segment_ids, segments], dim=1)
         q = self.project_q(x)
         k, v = self.expand_kv(latent)
-        key_inv_rms = torch.rsqrt(
-            k.float().square().mean(-1, keepdim=True) + self.k_norm.eps
-        )
+        key_inv_rms = self.key_inverse_rms(k)
         q = self.q_norm(q)
         k = self.k_norm(k)
 

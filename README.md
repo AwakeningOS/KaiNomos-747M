@@ -48,6 +48,9 @@ python examples/chat.py --checkpoint runs/myrun/step_00000001.pt
 ```
 
 入力形式と複数sourceの混合は[TRAINING.md](TRAINING.md)にまとめています。
+生成時はpromptをEOD区間ごとに一括prefillし、以降はKDA stateとMLA latent cacheを
+使って新しい1 tokenだけを入力します。実測と不採用のMLA吸収decodeは
+[INFERENCE.md](INFERENCE.md)に記録しています。
 
 ## モデルが文章を処理する仕組み
 
@@ -196,6 +199,7 @@ scripts/
 ├── run_kainomos_runtime_tuned.py       # 採用runtimeで厳密resume
 ├── kainomos_optimization_runtime.py    # state-dictを変えないruntime patch
 ├── benchmark_kainomos_runtime_candidate.py
+├── benchmark_kainomos_generation.py    # prefill/decode A/B
 └── validate_optimization_cuda.py       # CUDA parity gate
 examples/
 ├── quickstart.py       # full CUDA forwardの最小例

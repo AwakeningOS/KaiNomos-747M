@@ -1,6 +1,14 @@
 data/
 runs/
 reports/
+.venv
+.codex-hygiene/
+# Local development-run state; not part of the public clone experience.
+HANDOFF.md
+architecture/ACCEPTANCE_STATUS.md
+architecture/RESEARCH.md
+architecture/RUN_PROTOCOL_*.md
+architecture/OPTIMIZATION_STAGE2_RESULTS_*.md
 __pycache__/
 *.pyc
 *.pt

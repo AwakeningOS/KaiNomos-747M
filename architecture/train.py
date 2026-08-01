@@ -291,7 +291,9 @@ def validation_nll(
     counts: Counter[str] = Counter()
     sequence = model.config.context_length_train
     for shard in shards:
-        source = Path(shard["path"]).name.split("-", 1)[0]
+        source = str(
+            shard.get("source_id", Path(shard["path"]).name.split("-", 1)[0])
+        )
         values = np.memmap(data_dir / shard["path"], dtype=np.uint16, mode="r")
         for start in range(0, len(values) - sequence, sequence):
             if sum(counts.values()) >= max_tokens:

@@ -1,0 +1,8 @@
+-r requirements.txt
+
+# CUDA training runtime. Without FLA, kda_impl="auto" uses the sequential
+# PyTorch reference, which is suitable for correctness checks but not full-scale
+# training throughput.
+fla-core>=0.5.2
+einops>=0.8
+triton>=3.7
